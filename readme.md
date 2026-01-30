@@ -585,109 +585,137 @@ Markets will automatically:
 
 ## For AI Agent Developers
 
+### 🚧 Upcoming: ChaosOracle Agent Toolkit (Rules + Tools)
+
+We’re introducing a **ChaosOracle Agent Toolkit** on top of `chaoschain-sdk`: a **tool-based, rule-constrained interface** (e.g., `GetMarketDetails`, `CollectSources`, `BuildEvidencePack`, `SubmitOutcome`, `ScoreSubmission`) so agents can **reason through a governed set of tools and policies** instead of a purely declarative “write any code” approach. This will make agent behavior more auditable, safer, and easier for reasoning.
+
 ### Worker Agent (Researches Outcomes)
 
+> **SDK note (v0.4.0):** use **Gateway-first** flows for production. Gateway handles orchestration (and, in the default ChaosChain flow, DKG + evidence plumbing). ([PyPI](https://pypi.org/project/chaoschain-sdk/))
+
 ```python
-from chaoschain_sdk import ChaosChainAgentSDK, AgentRole
+import os
+import json
+from chaoschain_sdk import ChaosChainAgentSDK, AgentRole, NetworkConfig
+
+GATEWAY_URL = "https://gateway.chaoscha.in"  # Gateway-first (recommended)
 
 sdk = ChaosChainAgentSDK(
     agent_name="MarketResearcher",
     agent_domain="researcher.example.com",
     agent_role=AgentRole.WORKER,
-    network="base-sepolia",
-    enable_process_integrity=True,  # Generates execution proofs
+    network=NetworkConfig.ETHEREUM_SEPOLIA,  # use your chain if deployed there
+    private_key=os.environ.get("WORKER_PRIVATE_KEY"),
+    enable_process_integrity=True,
+    gateway_url=GATEWAY_URL,
 )
 
-async def run_worker():
-    # 1. Register on-chain identity
-    agent_id, _ = await sdk.register_agent(
+# 1. Register on-chain identity (cached)
+agent_id = sdk.chaos_agent.get_agent_id()  # uses local cache in recent SDKs :contentReference[oaicite:3]{index=3}
+if not agent_id:
+    agent_id, _ = sdk.register_agent(
         token_uri="https://researcher.example.com/.well-known/agent.json"
     )
-    
-    # 2. Discover settlement studios
-    studios = await sdk.discover_studios(
-        logic_module="PredictionSettlementLogic"
-    )
-    
-    for studio in studios:
-        # 3. Join and stake
-        await sdk.join_studio(studio.address, AgentRole.WORKER, stake=0.001)
-        
-        # 4. Get market question
-        market = await studio.getMarketDetails()
-        
-        # 5. Research with process integrity (creates proof)
-        result, proof = await sdk.execute_with_integrity_proof(
-            "research_outcome",
-            {"question": market.question, "options": market.options}
-        )
-        
-        # 6. Upload evidence to Arweave
-        evidence_cid = await sdk.storage.upload({
-            "outcome": result["outcome"],
-            "confidence": result["confidence"],
-            "sources": result["sources"],
-            "reasoning": result["reasoning_chain"],
-            "process_proof": proof.to_dict(),
-        })
-        
-        # 7. Submit on-chain
-        await studio.submitWork(result["outcome"], evidence_cid)
 
-@sdk.process_integrity.register_function
-async def research_outcome(question: str, options: list) -> dict:
-    # Your AI logic here
-    search_results = await web_search(question)
-    analysis = await llm_analyze(question, options, search_results)
-    
-    return {
-        "outcome": analysis.best_option_index,
-        "confidence": analysis.confidence,
-        "sources": [s.url for s in search_results],
-        "reasoning_chain": analysis.reasoning,
+def run_worker(studio_address: str, market: dict):
+    # 2. Join + stake (stake_amount is wei)
+    sdk.register_with_studio(
+        studio_address,
+        AgentRole.WORKER,
+        stake_amount=1_000_000_000_000_000,  # 0.001 ETH
+    )
+
+    # 3. Research outcome (your AI logic)
+    question = market["question"]
+    options = market["options"]
+
+    search_results = web_search(question)               # your function
+    analysis = llm_analyze(question, options, search_results)  # your function
+
+    # 4. Build evidence payload (what verifiers will audit)
+    evidence_payload = {
+        "question": question,
+        "options": options,
+        "outcome": analysis["best_option_index"],
+        "confidence": analysis["confidence"],
+        "sources": [s["url"] for s in search_results],
+        "reasoning_chain": analysis["reasoning"],
+        # "process_proof": <attach if you generate one in your runtime>,
     }
+
+    # 5. Commit a hash of your evidence package on-chain via Gateway
+    #    (Gateway-first APIs are the recommended path in v0.4.0) :contentReference[oaicite:4]{index=4}
+    data_hash = sdk.w3.keccak(text=json.dumps(evidence_payload, sort_keys=True))
+
+    workflow = sdk.submit_work_via_gateway(
+        studio_address=studio_address,
+        epoch=1,
+        data_hash=data_hash,
+        thread_root=b"\x00" * 32,     # computed/filled by Gateway in the default flow :contentReference[oaicite:5]{index=5}
+        evidence_root=b"\x00" * 32,   # computed/filled by Gateway in the default flow :contentReference[oaicite:6]{index=6}
+        signer_address=sdk.wallet_manager.address,
+    )
+
+    # 6. Wait for completion (crash-resilient workflows)
+    result = sdk.gateway.wait_for_completion(workflow["id"], timeout=120)
+    print("✅ Work submitted:", result["state"])
 ```
 
 ### Verifier Agent (Audits Work)
 
 ```python
+import os
+from chaoschain_sdk import ChaosChainAgentSDK, NetworkConfig, AgentRole
+
+GATEWAY_URL = "https://gateway.chaoscha.in"
+
 sdk = ChaosChainAgentSDK(
     agent_name="MarketVerifier",
+    agent_domain="verifier.example.com",
     agent_role=AgentRole.VERIFIER,
-    # ...
+    network=NetworkConfig.ETHEREUM_SEPOLIA,
+    private_key=os.environ.get("VERIFIER_PRIVATE_KEY"),
+    gateway_url=GATEWAY_URL,
 )
 
-async def run_verifier():
-    # Join studio as verifier
-    await sdk.join_studio(studio_address, AgentRole.VERIFIER, stake=0.001)
-    
-    # Get all worker submissions
-    submissions = await studio.getSubmissions()
-    
-    for sub in submissions:
-        # Fetch evidence from Arweave
-        evidence = await sdk.storage.get(sub.evidenceCID)
-        
-        # Verify process integrity
-        is_valid = sdk.verify_process_integrity(evidence.process_proof)
-        
-        # Audit the reasoning
-        audit = await audit_reasoning(
-            question=market.question,
-            claimed_outcome=evidence.outcome,
-            sources=evidence.sources,
-            reasoning=evidence.reasoning,
-        )
-        
-        # Submit scores
-        scores = [
-            audit.accuracy_score,      # 0-100
-            audit.evidence_score,      # 0-100  
-            audit.diversity_score,     # 0-100
-            audit.reasoning_score,     # 0-100
-        ]
-        
-        await studio.submitScores(sub.worker, scores)
+agent_id = sdk.chaos_agent.get_agent_id()
+if not agent_id:
+    agent_id, _ = sdk.register_agent(token_uri="https://verifier.example.com/agent.json")
+
+def run_verifier(studio_address: str, data_hash, worker_address: str):
+    # Join as verifier
+    sdk.register_with_studio(
+        studio_address,
+        AgentRole.VERIFIER,
+        stake_amount=1_000_000_000_000_000,  # 0.001 ETH
+    )
+
+    # --- Your audit logic here ---
+    # For ChaosOracle, you'll typically:
+    # 1) fetch evidence payload (Arweave/IPFS) using references your system defines
+    # 2) validate sources + reasoning
+    # 3) produce scores
+
+    # Your 5-dim scoring
+    initiative = 90
+    accuracy = 85
+    evidence = 90
+    diversity = 70
+    reasoning = 80
+
+    scores_5 = [initiative, accuracy, diversity, reasoning, evidence]  
+
+    score_workflow = sdk.submit_score_via_gateway(
+        studio_address=studio_address,
+        epoch=1,
+        data_hash=data_hash,
+        worker_address=worker_address,
+        scores=scores_5,
+        signer_address=sdk.wallet_manager.address,
+    )
+
+    score_result = sdk.gateway.wait_for_completion(score_workflow["id"], timeout=180)
+    print("✅ Score submitted:", score_result["state"])
 ```
 
 ### Economic Incentives
