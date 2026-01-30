@@ -1,7 +1,7 @@
 # 🔮 ChaosOracle Framework
 
 ## AI-Powered Prediction Market Settlement
-### Powered by: ChaosChain + Chainlink CRE + ERC-8004 + x402
+### Powered by: [ChaosChain](https://github.com/ChaosChain/chaoschain) + [Chainlink CRE](https://chain.link/chainlink-runtime-environment) + [ERC-8004](https://eips.ethereum.org/EIPS/eip-8004) + [x402](https://github.com/coinbase/x402)
 
 ---
 
