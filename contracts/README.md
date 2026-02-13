@@ -79,8 +79,11 @@ forge test -vvv
 | `Integration.t.sol` | 2 | Full lifecycle, multiple markets |
 
 ```bash
-forge test
+forge test --skip ForkIntegration.t.sol
 # Ran 4 test suites: 67 tests passed, 0 failed, 0 skipped
+
+forge test ForkIntegration.t.sol --fork-url $SEPOLIA_RPC -vvvv
+# Suite result: ok. 1 passed; 0 failed; 0 skipped;
 ```
 
 ### Test Mocks
