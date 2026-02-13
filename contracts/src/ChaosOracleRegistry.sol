@@ -4,8 +4,8 @@ pragma solidity ^0.8.24;
 import {Ownable} from "@openzeppelin/access/Ownable.sol";
 import {IChaosOracleRegistry} from "./interfaces/IChaosOracleRegistry.sol";
 import {IChaosOracleSettleable} from "./interfaces/IChaosOracleSettleable.sol";
-import {IChaosCore} from "@chaoschain/interfaces/IChaosCore.sol";
 import {IStudioProxy} from "@chaoschain/interfaces/IStudioProxy.sol";
+import {IStudioProxyFactory} from "@chaoschain/interfaces/IStudioProxyFactory.sol";
 import {MarketKey} from "./libraries/MarketKey.sol";
 
 /// @title ChaosOracleRegistry
@@ -40,14 +40,23 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
 
     // ============ Immutables ============
 
-    /// @notice ChaosChain ChaosCore factory address
+    /// @notice ChaosChain ChaosCore address
     address public immutable chaosCore;
 
-    /// @notice PredictionSettlementLogic template address (registered with ChaosCore)
+    /// @notice PredictionSettlementLogic template address
     address public immutable logicModuleTemplate;
 
     /// @notice Chainlink CRE Forwarder address
     address public immutable creForwarder;
+
+    /// @notice ChaosChain StudioProxyFactory (permissionless — bypasses ChaosCore onlyOwner gate)
+    address public immutable studioProxyFactory;
+
+    /// @notice ChaosChain Registry (protocol address book, not this contract)
+    address public immutable chaosChainRegistry;
+
+    /// @notice ChaosChain RewardsDistributor
+    address public immutable rewardsDistributor;
 
     // ============ State ============
 
@@ -89,21 +98,33 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
 
     // ============ Constructor ============
 
-    /// @param _chaosCore ChaosChain ChaosCore factory address
+    /// @param _chaosCore ChaosChain ChaosCore address
     /// @param _logicModuleTemplate PredictionSettlementLogic template address
     /// @param _creForwarder Chainlink CRE Forwarder address
+    /// @param _studioProxyFactory ChaosChain StudioProxyFactory address
+    /// @param _chaosChainRegistry ChaosChain Registry (protocol address book)
+    /// @param _rewardsDistributor ChaosChain RewardsDistributor address
     constructor(
         address _chaosCore,
         address _logicModuleTemplate,
-        address _creForwarder
+        address _creForwarder,
+        address _studioProxyFactory,
+        address _chaosChainRegistry,
+        address _rewardsDistributor
     ) Ownable(msg.sender) {
         require(_chaosCore != address(0), "ChaosOracleRegistry: zero chaosCore");
         require(_logicModuleTemplate != address(0), "ChaosOracleRegistry: zero logicModule");
         require(_creForwarder != address(0), "ChaosOracleRegistry: zero creForwarder");
+        require(_studioProxyFactory != address(0), "ChaosOracleRegistry: zero factory");
+        require(_chaosChainRegistry != address(0), "ChaosOracleRegistry: zero ccRegistry");
+        require(_rewardsDistributor != address(0), "ChaosOracleRegistry: zero rewards");
 
         chaosCore = _chaosCore;
         logicModuleTemplate = _logicModuleTemplate;
         creForwarder = _creForwarder;
+        studioProxyFactory = _studioProxyFactory;
+        chaosChainRegistry = _chaosChainRegistry;
+        rewardsDistributor = _rewardsDistributor;
     }
 
     // ============ Admin ============
@@ -163,9 +184,15 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
         require(block.timestamp >= pm.deadline, "ChaosOracleRegistry: deadline not reached");
         require(keyToStudio[key] == address(0), "ChaosOracleRegistry: studio already exists");
 
-        // Create studio via ChaosCore
-        string memory studioName = string(abi.encodePacked("ChaosOracle-", _bytes32ToHexString(key)));
-        (address proxy, uint256 studioId) = IChaosCore(chaosCore).createStudio(studioName, logicModuleTemplate);
+        // Deploy StudioProxy directly via StudioProxyFactory (permissionless).
+        // This bypasses ChaosCore.createStudio() which requires onlyOwner registration
+        // of our custom LogicModule. The factory itself has no access control.
+        address proxy = IStudioProxyFactory(studioProxyFactory).deployStudioProxy(
+            chaosCore,
+            chaosChainRegistry,
+            logicModuleTemplate,
+            rewardsDistributor
+        );
 
         // Fund the studio with the reward pool
         IStudioProxy(proxy).deposit{value: pm.reward}();
@@ -181,11 +208,11 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
         // Set this studio as the authorized settler on the prediction market
         IChaosOracleSettleable(pm.market).setSettler(pm.marketId, proxy);
 
-        // Track the active studio
+        // Track the active studio (studioId = 0 since not registered through ChaosCore)
         activeStudios[proxy] = ActiveStudio({
             key: key,
             studio: proxy,
-            studioId: studioId,
+            studioId: 0,
             market: pm.market,
             marketId: pm.marketId,
             settled: false
@@ -193,7 +220,7 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
         activeStudioList.push(proxy);
         keyToStudio[key] = proxy;
 
-        emit StudioCreated(key, proxy, studioId, pm.market, pm.marketId);
+        emit StudioCreated(key, proxy, 0, pm.market, pm.marketId);
     }
 
     /// @inheritdoc IChaosOracleRegistry

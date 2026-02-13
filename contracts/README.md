@@ -2,12 +2,20 @@
 
 Foundry project containing the core settlement framework contracts and an example prediction market.
 
+## Addresses
+
+| Contract                    | Sepolia                                                       |
+|-----------------------------|---------------------------------------------------------------|
+| `ChaosOracleRegistry`       | ``  |
+| `PredictionSettlementLogic` | ``      |
+| `ExamplePredictionMarket`   | `` |
+
 ## Architecture
 
 ```
 ChaosOracleRegistry (central hub)
   ├── Receives market registrations (payable)
-  ├── Creates ChaosChain Studios via ChaosCore
+  ├── Creates ChaosChain Studios via StudioProxyFactory (permissionless)
   ├── Routes CRE Forwarder calls (onlyCRE)
   └── Aggregates studio events for CRE triggers
 
@@ -39,6 +47,7 @@ ExamplePredictionMarket (reference implementation)
 `src/vendor/chaoschain/` contains ChaosChain interfaces vendored from `github.com/ChaosChain/chaoschain`:
 - `IChaosCore.sol` - ChaosCore factory interface
 - `IStudioProxy.sol` - Studio proxy interface
+- `IStudioProxyFactory.sol` - Permissionless studio proxy factory interface
 - `ProtocolConstants.sol` - Universal PoA dimensions
 - `LogicModule.sol` - Abstract base for LogicModules
 
@@ -79,6 +88,7 @@ forge test
 | Mock | Purpose |
 |------|---------|
 | `MockChaosCore` | Implements `createStudio()` with deterministic proxy deployment |
+| `MockStudioProxyFactory` | Deploys `MockStudioProxy` instances for testing |
 | `MockPredictionMarket` | Records `setSettler()` and `onSettlement()` calls |
 
 ## Deployment
@@ -86,24 +96,69 @@ forge test
 ### Order
 
 1. Deploy `PredictionSettlementLogic` (no dependencies)
-2. Register LogicModule with ChaosCore: `chaosCore.registerLogicModule(logicAddr, "PredictionSettlement")`
-3. Deploy `ChaosOracleRegistry(chaosCoreAddr, logicModuleAddr, creForwarderAddr)`
+2. Deploy `ChaosOracleRegistry(chaosCoreAddr, logicModuleAddr, creForwarderAddr, studioProxyFactoryAddr, chaosChainRegistryAddr, rewardsDistributorAddr)`
+3. Deploy `ExamplePredictionMarket(registryAddr)`
 4. Deploy CRE Workflow -> get `WORKFLOW_ID`
 5. Call `registry.setAuthorizedWorkflowId(WORKFLOW_ID)`
-6. Deploy `ExamplePredictionMarket(registryAddr)`
 
-### Using the deploy script
+### Deploy contracts
 
 ```bash
 # Configure
 cp .env.example .env
 # Edit .env with your keys and addresses
 
-# Deploy to Sepolia
-forge script script/DeployAll.s.sol --rpc-url $SEPOLIA_RPC_URL --broadcast
+# Deploy all contracts with Etherscan verification
+source .env && forge script script/DeployAll.s.sol \
+    --rpc-url $SEPOLIA_RPC \
+    --broadcast \
+    --verify
+```
 
-# Deploy to Base Sepolia
-forge script script/DeployAll.s.sol --rpc-url $BASE_SEPOLIA_RPC_URL --broadcast
+### Post-deployment setup
+
+```bash
+# Update .env with deployed addresses:
+#   REGISTRY=0x...
+#   LOGIC_MODULE=0x...
+
+# Step 1: Deploy CRE workflow via `cre workflow deploy`, then set CRE_WORKFLOW_ID in .env
+
+# Step 2: Set workflow ID on Registry
+source .env && forge script script/PostDeploy.s.sol \
+    --sig "setWorkflowId()" \
+    --rpc-url $SEPOLIA_RPC \
+    --broadcast
+```
+
+### Verify already-deployed contracts
+
+If contracts were deployed without `--verify`, verify them manually:
+
+```bash
+# PredictionSettlementLogic (no constructor args)
+forge verify-contract $LOGIC_MODULE \
+    src/PredictionSettlementLogic.sol:PredictionSettlementLogic \
+    --chain sepolia \
+    --etherscan-api-key $ETHERSCAN_API_KEY
+
+# ChaosOracleRegistry (6 constructor args)
+forge verify-contract $REGISTRY \
+    src/ChaosOracleRegistry.sol:ChaosOracleRegistry \
+    --chain sepolia \
+    --etherscan-api-key $ETHERSCAN_API_KEY \
+    --constructor-args $(cast abi-encode \
+        "constructor(address,address,address,address,address,address)" \
+        $CHAOS_CORE $LOGIC_MODULE $CRE_FORWARDER \
+        $STUDIO_PROXY_FACTORY $CHAOSCHAIN_REGISTRY $REWARDS_DISTRIBUTOR)
+
+# ExamplePredictionMarket (1 constructor arg)
+forge verify-contract <MARKET_ADDRESS> \
+    src/example/ExamplePredictionMarket.sol:ExamplePredictionMarket \
+    --chain sepolia \
+    --etherscan-api-key $ETHERSCAN_API_KEY \
+    --constructor-args $(cast abi-encode \
+        "constructor(address)" $REGISTRY)
 ```
 
 ### Network configs
@@ -149,6 +204,7 @@ contracts/
 │       └── MockPredictionMarket.sol
 ├── script/
 │   ├── DeployAll.s.sol
+│   ├── PostDeploy.s.sol
 │   └── config/
 │       ├── sepolia.json
 │       └── base-sepolia.json

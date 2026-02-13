@@ -5,25 +5,29 @@ import {Test} from "forge-std/Test.sol";
 import {ExamplePredictionMarket} from "../src/example/ExamplePredictionMarket.sol";
 import {ChaosOracleRegistry} from "../src/ChaosOracleRegistry.sol";
 import {PredictionSettlementLogic} from "../src/PredictionSettlementLogic.sol";
-import {MockChaosCore} from "./mocks/MockChaosCore.sol";
+import {MockChaosCore, MockStudioProxyFactory} from "./mocks/MockChaosCore.sol";
 
 contract ExamplePredictionMarketTest is Test {
     ExamplePredictionMarket market;
     ChaosOracleRegistry registry;
     MockChaosCore chaosCore;
+    MockStudioProxyFactory proxyFactory;
     PredictionSettlementLogic logic;
     address creForwarder = address(0xC4E);
+    address chaosChainRegistry = address(0xCC1);
+    address rewardsDistributor = address(0x4E1);
 
     address alice = address(0xA11CE);
     address bob = address(0xB0B);
 
     function setUp() public {
         chaosCore = new MockChaosCore();
+        proxyFactory = new MockStudioProxyFactory();
         logic = new PredictionSettlementLogic();
-        chaosCore.registerLogicModule(address(logic), "PredictionSettlement");
 
         registry = new ChaosOracleRegistry(
-            address(chaosCore), address(logic), creForwarder
+            address(chaosCore), address(logic), creForwarder,
+            address(proxyFactory), chaosChainRegistry, rewardsDistributor
         );
 
         market = new ExamplePredictionMarket(address(registry));

@@ -5,7 +5,7 @@ import {Test, console} from "forge-std/Test.sol";
 import {ChaosOracleRegistry} from "../src/ChaosOracleRegistry.sol";
 import {PredictionSettlementLogic} from "../src/PredictionSettlementLogic.sol";
 import {ExamplePredictionMarket} from "../src/example/ExamplePredictionMarket.sol";
-import {MockChaosCore} from "./mocks/MockChaosCore.sol";
+import {MockChaosCore, MockStudioProxyFactory} from "./mocks/MockChaosCore.sol";
 import {MarketKey} from "../src/libraries/MarketKey.sol";
 
 /// @title IntegrationTest
@@ -14,9 +14,12 @@ import {MarketKey} from "../src/libraries/MarketKey.sol";
 contract IntegrationTest is Test {
     ChaosOracleRegistry registry;
     MockChaosCore chaosCore;
+    MockStudioProxyFactory proxyFactory;
     PredictionSettlementLogic logic;
     ExamplePredictionMarket market;
     address creForwarder = address(0xC4E);
+    address chaosChainRegistry = address(0xCC1);
+    address rewardsDistributor = address(0x4E1);
 
     address alice = address(0xA11CE);   // Market creator
     address bob = address(0xB0B);       // Bettor (Yes)
@@ -30,11 +33,12 @@ contract IntegrationTest is Test {
     function setUp() public {
         // Deploy protocol
         chaosCore = new MockChaosCore();
+        proxyFactory = new MockStudioProxyFactory();
         logic = new PredictionSettlementLogic();
-        chaosCore.registerLogicModule(address(logic), "PredictionSettlement");
 
         registry = new ChaosOracleRegistry(
-            address(chaosCore), address(logic), creForwarder
+            address(chaosCore), address(logic), creForwarder,
+            address(proxyFactory), chaosChainRegistry, rewardsDistributor
         );
 
         market = new ExamplePredictionMarket(address(registry));

@@ -4,30 +4,34 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {ChaosOracleRegistry} from "../src/ChaosOracleRegistry.sol";
 import {PredictionSettlementLogic} from "../src/PredictionSettlementLogic.sol";
-import {MockChaosCore} from "./mocks/MockChaosCore.sol";
+import {MockChaosCore, MockStudioProxyFactory} from "./mocks/MockChaosCore.sol";
 import {MockPredictionMarket} from "./mocks/MockPredictionMarket.sol";
 import {MarketKey} from "../src/libraries/MarketKey.sol";
 
 contract ChaosOracleRegistryTest is Test {
     ChaosOracleRegistry registry;
     MockChaosCore chaosCore;
+    MockStudioProxyFactory proxyFactory;
     PredictionSettlementLogic logic;
     address creForwarder = address(0xC4E);
+    address chaosChainRegistry = address(0xCC1);
+    address rewardsDistributor = address(0x4E1);
     address owner;
 
     function setUp() public {
         owner = address(this);
 
         chaosCore = new MockChaosCore();
+        proxyFactory = new MockStudioProxyFactory();
         logic = new PredictionSettlementLogic();
-
-        // Register the logic module with ChaosCore
-        chaosCore.registerLogicModule(address(logic), "PredictionSettlement");
 
         registry = new ChaosOracleRegistry(
             address(chaosCore),
             address(logic),
-            creForwarder
+            creForwarder,
+            address(proxyFactory),
+            chaosChainRegistry,
+            rewardsDistributor
         );
     }
 
@@ -37,22 +41,25 @@ contract ChaosOracleRegistryTest is Test {
         assertEq(registry.chaosCore(), address(chaosCore));
         assertEq(registry.logicModuleTemplate(), address(logic));
         assertEq(registry.creForwarder(), creForwarder);
+        assertEq(registry.studioProxyFactory(), address(proxyFactory));
+        assertEq(registry.chaosChainRegistry(), chaosChainRegistry);
+        assertEq(registry.rewardsDistributor(), rewardsDistributor);
         assertEq(registry.owner(), owner);
     }
 
     function test_constructor_revertsZeroChaosCore() public {
         vm.expectRevert("ChaosOracleRegistry: zero chaosCore");
-        new ChaosOracleRegistry(address(0), address(logic), creForwarder);
+        new ChaosOracleRegistry(address(0), address(logic), creForwarder, address(proxyFactory), chaosChainRegistry, rewardsDistributor);
     }
 
     function test_constructor_revertsZeroLogicModule() public {
         vm.expectRevert("ChaosOracleRegistry: zero logicModule");
-        new ChaosOracleRegistry(address(chaosCore), address(0), creForwarder);
+        new ChaosOracleRegistry(address(chaosCore), address(0), creForwarder, address(proxyFactory), chaosChainRegistry, rewardsDistributor);
     }
 
     function test_constructor_revertsZeroCreForwarder() public {
         vm.expectRevert("ChaosOracleRegistry: zero creForwarder");
-        new ChaosOracleRegistry(address(chaosCore), address(logic), address(0));
+        new ChaosOracleRegistry(address(chaosCore), address(logic), address(0), address(proxyFactory), chaosChainRegistry, rewardsDistributor);
     }
 
     // ============ Admin Tests ============

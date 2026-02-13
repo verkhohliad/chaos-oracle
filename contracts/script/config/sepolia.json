@@ -6,7 +6,7 @@
     "studioProxyFactory": "0x230e76a105A9737Ea801BB7d0624D495506EE257",
     "erc8004Identity": "0x8004A818BFB912233c491871b3d84c89A494BD9e",
     "erc8004Reputation": "0x8004B663056A597Dffe9eCcC1965A193B7388713",
-    "creForwarder": "0x0000000000000000000000000000000000000000",
+    "creForwarder": "0x15fc6ae953e024d975e77382eeec56a9101f9f88",
     "rpcUrl": "https://eth-sepolia.g.alchemy.com/v2/YOUR_KEY",
     "explorerUrl": "https://sepolia.etherscan.io"
 }

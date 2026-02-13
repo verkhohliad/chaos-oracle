@@ -4,16 +4,19 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {PredictionSettlementLogic} from "../src/PredictionSettlementLogic.sol";
 import {ChaosOracleRegistry} from "../src/ChaosOracleRegistry.sol";
-import {MockChaosCore, MockStudioProxy} from "./mocks/MockChaosCore.sol";
+import {MockChaosCore, MockStudioProxyFactory} from "./mocks/MockChaosCore.sol";
 import {MockPredictionMarket} from "./mocks/MockPredictionMarket.sol";
 import {MarketKey} from "../src/libraries/MarketKey.sol";
 
 contract PredictionSettlementLogicTest is Test {
     ChaosOracleRegistry registry;
     MockChaosCore chaosCore;
+    MockStudioProxyFactory proxyFactory;
     PredictionSettlementLogic logic;
     MockPredictionMarket predMarket;
     address creForwarder = address(0xC4E);
+    address chaosChainRegistry = address(0xCC1);
+    address rewardsDistributor = address(0x4E1);
 
     // Studio proxy created during setup
     address studioProxy;
@@ -26,11 +29,12 @@ contract PredictionSettlementLogicTest is Test {
 
     function setUp() public {
         chaosCore = new MockChaosCore();
+        proxyFactory = new MockStudioProxyFactory();
         logic = new PredictionSettlementLogic();
-        chaosCore.registerLogicModule(address(logic), "PredictionSettlement");
 
         registry = new ChaosOracleRegistry(
-            address(chaosCore), address(logic), creForwarder
+            address(chaosCore), address(logic), creForwarder,
+            address(proxyFactory), chaosChainRegistry, rewardsDistributor
         );
 
         predMarket = new MockPredictionMarket(address(registry));

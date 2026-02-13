@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {IChaosCore} from "@chaoschain/interfaces/IChaosCore.sol";
+import {IStudioProxyFactory} from "@chaoschain/interfaces/IStudioProxyFactory.sol";
 
 /// @title MockChaosCore
 /// @notice Mock implementation of ChaosCore for testing.
@@ -65,6 +66,21 @@ contract MockChaosCore is IChaosCore {
 
     function getStudiosByOwner(address owner) external view returns (uint256[] memory) {
         return _ownerStudios[owner];
+    }
+}
+
+/// @title MockStudioProxyFactory
+/// @notice Mock of StudioProxyFactory for testing.
+///         Deploys MockStudioProxy instances (same as MockChaosCore would).
+contract MockStudioProxyFactory is IStudioProxyFactory {
+    function deployStudioProxy(
+        address,
+        address,
+        address logicModule_,
+        address
+    ) external override returns (address proxy) {
+        MockStudioProxy proxyContract = new MockStudioProxy(logicModule_);
+        proxy = address(proxyContract);
     }
 }
 
