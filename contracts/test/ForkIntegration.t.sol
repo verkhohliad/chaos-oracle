@@ -251,7 +251,7 @@ contract ForkIntegrationTest is Test {
 
         // Charlie (No) should fail
         vm.prank(charlie);
-        vm.expectRevert("ExamplePredictionMarket: no winning bet");
+        vm.expectRevert(ExamplePredictionMarket.NoWinningBet.selector);
         market.claimWinnings(marketId);
 
         console.log("Alice payout:", alicePayout);

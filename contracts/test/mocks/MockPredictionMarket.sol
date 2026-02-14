@@ -7,6 +7,9 @@ import {IChaosOracleSettleable} from "../../src/interfaces/IChaosOracleSettleabl
 /// @notice Mock implementation of IChaosOracleSettleable for testing.
 ///         Records all calls for assertion in tests.
 contract MockPredictionMarket is IChaosOracleSettleable {
+    error OnlyRegistry();
+    error OnlySettler();
+
     address public registry;
 
     struct SettlementRecord {
@@ -25,12 +28,12 @@ contract MockPredictionMarket is IChaosOracleSettleable {
     }
 
     function setSettler(uint256 marketId, address settler) external override {
-        require(msg.sender == registry, "MockPredictionMarket: only registry");
+        if (msg.sender != registry) revert OnlyRegistry();
         settlers[marketId] = settler;
     }
 
     function onSettlement(uint256 marketId, uint8 outcome, bytes32 proofHash) external override {
-        require(msg.sender == settlers[marketId], "MockPredictionMarket: only settler");
+        if (msg.sender != settlers[marketId]) revert OnlySettler();
         settlements[marketId] = SettlementRecord({
             marketId: marketId,
             outcome: outcome,

@@ -16,6 +16,25 @@ import {IChaosOracleRegistry} from "./interfaces/IChaosOracleRegistry.sol";
 ///      Storage layout: LogicModule base storage first, then ChaosOracle-specific storage.
 ///      Since this runs via delegatecall from StudioProxy, all state lives in the proxy's storage.
 contract PredictionSettlementLogic is LogicModule {
+    // ============ Custom Errors ============
+
+    error AlreadyInitialized();
+    error EpochAlreadyClosed();
+    error AlreadyRegistered();
+    error InsufficientStake();
+    error WorkerCannotVerify();
+    error NotRegisteredWorker();
+    error AlreadySubmitted();
+    error InvalidOutcome();
+    error EmptyEvidence();
+    error NotRegisteredVerifier();
+    error WorkerHasNoSubmission();
+    error AlreadyScored();
+    error ScoreOutOfRange();
+    error OnlyRegistry();
+    error AlreadyClosed();
+    error ThresholdsNotMet();
+
     // ============ ChaosOracle-Specific Storage ============
     // CRITICAL: These come AFTER LogicModule's storage slots
 
@@ -88,7 +107,7 @@ contract PredictionSettlementLogic is LogicModule {
 
     /// @inheritdoc LogicModule
     function initialize(bytes calldata params) external override {
-        require(!initialized, "PredictionSettlementLogic: already initialized");
+        if (initialized) revert AlreadyInitialized();
         initialized = true;
 
         (
@@ -104,8 +123,10 @@ contract PredictionSettlementLogic is LogicModule {
         marketId = _marketId;
         question = _question;
 
-        for (uint256 i = 0; i < _options.length; i++) {
+        uint256 optLen = _options.length;
+        for (uint256 i = 0; i < optLen;) {
             options.push(_options[i]);
+            unchecked { ++i; }
         }
     }
 
@@ -158,9 +179,9 @@ contract PredictionSettlementLogic is LogicModule {
     /// @notice Register as a worker agent for this settlement studio
     /// @dev Requires WORKER_STAKE in msg.value
     function registerAsWorker() external payable {
-        require(!epochClosed, "PredictionSettlementLogic: epoch closed");
-        require(!isWorkerRegistered[msg.sender], "PredictionSettlementLogic: already registered");
-        require(msg.value >= WORKER_STAKE, "PredictionSettlementLogic: insufficient stake");
+        if (epochClosed) revert EpochAlreadyClosed();
+        if (isWorkerRegistered[msg.sender]) revert AlreadyRegistered();
+        if (msg.value < WORKER_STAKE) revert InsufficientStake();
 
         isWorkerRegistered[msg.sender] = true;
         workerList.push(msg.sender);
@@ -175,10 +196,10 @@ contract PredictionSettlementLogic is LogicModule {
     /// @notice Register as a verifier agent for this settlement studio
     /// @dev Requires VERIFIER_STAKE in msg.value
     function registerAsVerifier() external payable {
-        require(!epochClosed, "PredictionSettlementLogic: epoch closed");
-        require(!isVerifierRegistered[msg.sender], "PredictionSettlementLogic: already registered");
-        require(!isWorkerRegistered[msg.sender], "PredictionSettlementLogic: workers cannot verify");
-        require(msg.value >= VERIFIER_STAKE, "PredictionSettlementLogic: insufficient stake");
+        if (epochClosed) revert EpochAlreadyClosed();
+        if (isVerifierRegistered[msg.sender]) revert AlreadyRegistered();
+        if (isWorkerRegistered[msg.sender]) revert WorkerCannotVerify();
+        if (msg.value < VERIFIER_STAKE) revert InsufficientStake();
 
         isVerifierRegistered[msg.sender] = true;
         verifierList.push(msg.sender);
@@ -193,11 +214,11 @@ contract PredictionSettlementLogic is LogicModule {
     /// @param outcome The predicted outcome index (0-based, matching options array)
     /// @param evidenceCID The IPFS/Arweave CID pointing to evidence package
     function submitWork(uint8 outcome, string calldata evidenceCID) external {
-        require(!epochClosed, "PredictionSettlementLogic: epoch closed");
-        require(isWorkerRegistered[msg.sender], "PredictionSettlementLogic: not registered worker");
-        require(submissions[msg.sender].timestamp == 0, "PredictionSettlementLogic: already submitted");
-        require(outcome < options.length, "PredictionSettlementLogic: invalid outcome");
-        require(bytes(evidenceCID).length > 0, "PredictionSettlementLogic: empty evidence");
+        if (epochClosed) revert EpochAlreadyClosed();
+        if (!isWorkerRegistered[msg.sender]) revert NotRegisteredWorker();
+        if (submissions[msg.sender].timestamp != 0) revert AlreadySubmitted();
+        if (outcome >= options.length) revert InvalidOutcome();
+        if (bytes(evidenceCID).length == 0) revert EmptyEvidence();
 
         submissions[msg.sender] = WorkSubmission({
             outcome: outcome,
@@ -217,22 +238,24 @@ contract PredictionSettlementLogic is LogicModule {
     /// @param worker The worker address being scored
     /// @param scores [accuracy, evidenceQuality, sourceDiversity, reasoningDepth] each 0-100
     function submitScores(address worker, uint8[4] calldata scores) external {
-        require(!epochClosed, "PredictionSettlementLogic: epoch closed");
-        require(isVerifierRegistered[msg.sender], "PredictionSettlementLogic: not registered verifier");
-        require(submissions[worker].timestamp > 0, "PredictionSettlementLogic: worker has no submission");
-        require(verifierScores[msg.sender][worker][0] == 0 && verifierScores[msg.sender][worker][1] == 0,
-            "PredictionSettlementLogic: already scored");
+        if (epochClosed) revert EpochAlreadyClosed();
+        if (!isVerifierRegistered[msg.sender]) revert NotRegisteredVerifier();
+        WorkSubmission storage sub = submissions[worker];
+        if (sub.timestamp == 0) revert WorkerHasNoSubmission();
+        uint8[4] storage existingScores = verifierScores[msg.sender][worker];
+        if (existingScores[0] != 0 || existingScores[1] != 0) revert AlreadyScored();
 
         // Validate score ranges
-        for (uint256 i = 0; i < 4; i++) {
-            require(scores[i] <= 100, "PredictionSettlementLogic: score > 100");
+        for (uint256 i = 0; i < 4;) {
+            if (scores[i] > 100) revert ScoreOutOfRange();
+            unchecked { ++i; }
         }
 
         verifierScores[msg.sender][worker] = scores;
         scoreCount[worker]++;
 
         // Record in StudioProxy's score tracking
-        bytes32 dataHash = keccak256(abi.encodePacked(worker, submissions[worker].outcome, submissions[worker].evidenceCID));
+        bytes32 dataHash = keccak256(abi.encodePacked(worker, sub.outcome, sub.evidenceCID));
         _recordScoreVector(dataHash, msg.sender, abi.encode(scores));
 
         emit ScoresSubmitted(msg.sender, worker, scores);
@@ -247,9 +270,9 @@ contract PredictionSettlementLogic is LogicModule {
     /// @notice Close the epoch, compute consensus, and settle the prediction market
     /// @dev Only callable by the ChaosOracleRegistry
     function closeEpoch() external {
-        require(msg.sender == oracleRegistry, "PredictionSettlementLogic: only registry");
-        require(!epochClosed, "PredictionSettlementLogic: already closed");
-        require(_canCloseInternal(), "PredictionSettlementLogic: thresholds not met");
+        if (msg.sender != oracleRegistry) revert OnlyRegistry();
+        if (epochClosed) revert AlreadyClosed();
+        if (!_canCloseInternal()) revert ThresholdsNotMet();
 
         epochClosed = true;
 
@@ -297,16 +320,19 @@ contract PredictionSettlementLogic is LogicModule {
     // ============ Internal ============
 
     function _canCloseInternal() internal view returns (bool) {
+        uint256 workerLen = workerList.length;
         if (epochClosed) return false;
-        if (workerList.length < MIN_WORKERS) return false;
+        if (workerLen < MIN_WORKERS) return false;
         if (verifierList.length < MIN_VERIFIERS) return false;
 
         // Check that enough workers have been scored
         uint256 sufficientlyScored = 0;
-        for (uint256 i = 0; i < workerList.length; i++) {
-            if (submissions[workerList[i]].timestamp > 0 && scoreCount[workerList[i]] >= MIN_SCORES_PER_WORKER) {
-                sufficientlyScored++;
+        for (uint256 i = 0; i < workerLen;) {
+            address worker = workerList[i];
+            if (submissions[worker].timestamp > 0 && scoreCount[worker] >= MIN_SCORES_PER_WORKER) {
+                unchecked { ++sufficientlyScored; }
             }
+            unchecked { ++i; }
         }
         return sufficientlyScored >= MIN_WORKERS;
     }
@@ -318,32 +344,41 @@ contract PredictionSettlementLogic is LogicModule {
     function _computeConsensus() internal view returns (uint8 winningOutcome, bytes32 proofHash) {
         uint256 optCount = options.length;
         uint256[] memory outcomeWeights = new uint256[](optCount);
+        uint256 workerLen = workerList.length;
+        uint256 verifierLen = verifierList.length;
 
         // Accumulate evidence CIDs for proof hash
         bytes memory allEvidence;
 
-        for (uint256 i = 0; i < workerList.length; i++) {
+        for (uint256 i = 0; i < workerLen;) {
             address worker = workerList[i];
             WorkSubmission storage sub = submissions[worker];
 
             // Skip workers who haven't submitted or haven't been scored enough
-            if (sub.timestamp == 0 || scoreCount[worker] < MIN_SCORES_PER_WORKER) continue;
+            if (sub.timestamp == 0 || scoreCount[worker] < MIN_SCORES_PER_WORKER) {
+                unchecked { ++i; }
+                continue;
+            }
 
             // Calculate average score across all verifiers for this worker
             uint256 totalScore = 0;
             uint256 numScorers = 0;
-            for (uint256 j = 0; j < verifierList.length; j++) {
+            for (uint256 j = 0; j < verifierLen;) {
                 address verifier = verifierList[j];
                 uint8[4] storage vs = verifierScores[verifier][worker];
                 // Check if this verifier scored this worker (any non-zero dimension)
                 if (vs[0] > 0 || vs[1] > 0 || vs[2] > 0 || vs[3] > 0) {
                     // Average of 4 dimensions
                     totalScore += uint256(vs[0]) + uint256(vs[1]) + uint256(vs[2]) + uint256(vs[3]);
-                    numScorers++;
+                    unchecked { ++numScorers; }
                 }
+                unchecked { ++j; }
             }
 
-            if (numScorers == 0) continue;
+            if (numScorers == 0) {
+                unchecked { ++i; }
+                continue;
+            }
 
             // Average score for this worker (0-400 range / numScorers)
             uint256 avgScore = totalScore / numScorers;
@@ -353,15 +388,17 @@ contract PredictionSettlementLogic is LogicModule {
 
             // Accumulate evidence for proof
             allEvidence = abi.encodePacked(allEvidence, sub.evidenceCID);
+            unchecked { ++i; }
         }
 
         // Find winning outcome (highest weight)
         uint256 maxWeight = 0;
-        for (uint256 i = 0; i < optCount; i++) {
+        for (uint256 i = 0; i < optCount;) {
             if (outcomeWeights[i] > maxWeight) {
                 maxWeight = outcomeWeights[i];
                 winningOutcome = uint8(i);
             }
+            unchecked { ++i; }
         }
 
         proofHash = keccak256(allEvidence);
@@ -369,8 +406,10 @@ contract PredictionSettlementLogic is LogicModule {
 
     /// @dev Count total individual verifier-worker score entries
     function _totalScoreCount() internal view returns (uint256 total) {
-        for (uint256 i = 0; i < workerList.length; i++) {
+        uint256 workerLen = workerList.length;
+        for (uint256 i = 0; i < workerLen;) {
             total += scoreCount[workerList[i]];
+            unchecked { ++i; }
         }
     }
 }

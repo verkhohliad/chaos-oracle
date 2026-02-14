@@ -416,7 +416,7 @@ contract PredictionSettlementLogicTest is Test {
 
         bytes memory creReport = abi.encode(bytes32(0));
         vm.prank(creForwarder);
-        vm.expectRevert("ChaosOracleRegistry: closeEpoch failed");
+        vm.expectRevert(ChaosOracleRegistry.CloseEpochFailed.selector);
         registry.closeStudioEpoch(studioProxy, creReport);
     }
 

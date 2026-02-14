@@ -74,19 +74,19 @@ contract ExamplePredictionMarketTest is Test {
 
     function test_createMarket_revertsNoETH() public {
         vm.prank(alice);
-        vm.expectRevert("ExamplePredictionMarket: no ETH sent");
+        vm.expectRevert(ExamplePredictionMarket.NoETHSent.selector);
         market.createMarket("Q?", block.timestamp + 1 days);
     }
 
     function test_createMarket_revertsEmptyQuestion() public {
         vm.prank(alice);
-        vm.expectRevert("ExamplePredictionMarket: empty question");
+        vm.expectRevert(ExamplePredictionMarket.EmptyQuestion.selector);
         market.createMarket{value: 1 ether}("", block.timestamp + 1 days);
     }
 
     function test_createMarket_revertsDeadlineInPast() public {
         vm.prank(alice);
-        vm.expectRevert("ExamplePredictionMarket: deadline in past");
+        vm.expectRevert(ExamplePredictionMarket.DeadlineInPast.selector);
         market.createMarket{value: 1 ether}("Q?", block.timestamp - 1);
     }
 
@@ -111,7 +111,7 @@ contract ExamplePredictionMarketTest is Test {
         market.createMarket{value: 1 ether}("Q?", block.timestamp + 1 days);
 
         vm.prank(bob);
-        vm.expectRevert("ExamplePredictionMarket: invalid option");
+        vm.expectRevert(ExamplePredictionMarket.InvalidOption.selector);
         market.placeBet{value: 1 ether}(0, 2);
     }
 
@@ -122,7 +122,7 @@ contract ExamplePredictionMarketTest is Test {
 
         vm.warp(deadline + 1);
         vm.prank(bob);
-        vm.expectRevert("ExamplePredictionMarket: deadline passed");
+        vm.expectRevert(ExamplePredictionMarket.DeadlinePassed.selector);
         market.placeBet{value: 1 ether}(0, 0);
     }
 
@@ -131,14 +131,14 @@ contract ExamplePredictionMarketTest is Test {
         market.createMarket{value: 1 ether}("Q?", block.timestamp + 1 days);
 
         vm.prank(bob);
-        vm.expectRevert("ExamplePredictionMarket: no ETH sent");
+        vm.expectRevert(ExamplePredictionMarket.NoETHSent.selector);
         market.placeBet(0, 0);
     }
 
     // ============ Settlement Tests ============
 
     function test_setSettler_revertsNotRegistry() public {
-        vm.expectRevert("ExamplePredictionMarket: only registry");
+        vm.expectRevert(ExamplePredictionMarket.OnlyRegistry.selector);
         market.setSettler(0, address(0x123));
     }
 
@@ -168,7 +168,7 @@ contract ExamplePredictionMarketTest is Test {
         vm.prank(address(registry));
         market.setSettler(0, address(0x5E771E));
 
-        vm.expectRevert("ExamplePredictionMarket: only settler");
+        vm.expectRevert(ExamplePredictionMarket.OnlySettler.selector);
         market.onSettlement(0, 0, bytes32("proof"));
     }
 
@@ -231,7 +231,7 @@ contract ExamplePredictionMarketTest is Test {
         market.createMarket{value: 1 ether}("Q?", block.timestamp + 1 days);
 
         vm.prank(alice);
-        vm.expectRevert("ExamplePredictionMarket: not settled");
+        vm.expectRevert(ExamplePredictionMarket.NotSettled.selector);
         market.claimWinnings(0);
     }
 
@@ -250,7 +250,7 @@ contract ExamplePredictionMarketTest is Test {
         market.claimWinnings(0);
 
         vm.prank(alice);
-        vm.expectRevert("ExamplePredictionMarket: already claimed");
+        vm.expectRevert(ExamplePredictionMarket.AlreadyClaimed.selector);
         market.claimWinnings(0);
     }
 
@@ -270,7 +270,7 @@ contract ExamplePredictionMarketTest is Test {
 
         // Bob tries to claim but he bet on No
         vm.prank(bob);
-        vm.expectRevert("ExamplePredictionMarket: no winning bet");
+        vm.expectRevert(ExamplePredictionMarket.NoWinningBet.selector);
         market.claimWinnings(0);
     }
 

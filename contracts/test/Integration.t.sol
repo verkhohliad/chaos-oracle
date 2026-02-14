@@ -241,7 +241,7 @@ contract IntegrationTest is Test {
 
         // Charlie had No bets - should revert
         vm.prank(charlie);
-        vm.expectRevert("ExamplePredictionMarket: no winning bet");
+        vm.expectRevert(ExamplePredictionMarket.NoWinningBet.selector);
         market.claimWinnings(marketId);
     }
 

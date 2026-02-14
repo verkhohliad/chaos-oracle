@@ -15,6 +15,24 @@ import {IChaosOracleRegistry} from "../interfaces/IChaosOracleRegistry.sol";
 ///      4. Studio calls onSettlement() with the winning outcome
 ///      5. Winners call claimWinnings() to receive pro-rata from the losing pool
 contract ExamplePredictionMarket is IChaosOracleSettleable {
+    // ============ Custom Errors ============
+
+    error ZeroAddress();
+    error NoETHSent();
+    error EmptyQuestion();
+    error DeadlineInPast();
+    error MarketNotFound();
+    error AlreadySettled();
+    error DeadlinePassed();
+    error InvalidOption();
+    error OnlyRegistry();
+    error SettlerAlreadySet();
+    error OnlySettler();
+    error InvalidOutcome();
+    error NotSettled();
+    error AlreadyClaimed();
+    error NoWinningBet();
+    error TransferFailed();
     // ============ Structs ============
 
     struct Market {
@@ -83,7 +101,7 @@ contract ExamplePredictionMarket is IChaosOracleSettleable {
 
     /// @param _registry ChaosOracleRegistry address
     constructor(address _registry) {
-        require(_registry != address(0), "ExamplePredictionMarket: zero registry");
+        if (_registry == address(0)) revert ZeroAddress();
         registry = _registry;
     }
 
@@ -99,11 +117,11 @@ contract ExamplePredictionMarket is IChaosOracleSettleable {
         string calldata _question,
         uint256 _deadline
     ) external payable returns (uint256 marketId) {
-        require(msg.value > 0, "ExamplePredictionMarket: no ETH sent");
-        require(bytes(_question).length > 0, "ExamplePredictionMarket: empty question");
-        require(_deadline > block.timestamp, "ExamplePredictionMarket: deadline in past");
+        if (msg.value == 0) revert NoETHSent();
+        if (bytes(_question).length == 0) revert EmptyQuestion();
+        if (_deadline <= block.timestamp) revert DeadlineInPast();
 
-        marketId = nextMarketId++;
+        unchecked { marketId = nextMarketId++; }
 
         // Calculate settlement reward (10%)
         uint256 reward = (msg.value * SETTLEMENT_REWARD_BPS) / BPS_DENOMINATOR;
@@ -146,11 +164,11 @@ contract ExamplePredictionMarket is IChaosOracleSettleable {
     /// @param _option 0 = Yes, 1 = No
     function placeBet(uint256 _marketId, uint8 _option) external payable {
         Market storage m = markets[_marketId];
-        require(m.exists, "ExamplePredictionMarket: market not found");
-        require(!m.settled, "ExamplePredictionMarket: already settled");
-        require(block.timestamp < m.deadline, "ExamplePredictionMarket: deadline passed");
-        require(_option <= 1, "ExamplePredictionMarket: invalid option");
-        require(msg.value > 0, "ExamplePredictionMarket: no ETH sent");
+        if (!m.exists) revert MarketNotFound();
+        if (m.settled) revert AlreadySettled();
+        if (block.timestamp >= m.deadline) revert DeadlinePassed();
+        if (_option > 1) revert InvalidOption();
+        if (msg.value == 0) revert NoETHSent();
 
         m.pools[_option] += msg.value;
         bets[_marketId][msg.sender][_option] += msg.value;
@@ -162,10 +180,10 @@ contract ExamplePredictionMarket is IChaosOracleSettleable {
 
     /// @inheritdoc IChaosOracleSettleable
     function setSettler(uint256 _marketId, address _settler) external {
-        require(msg.sender == registry, "ExamplePredictionMarket: only registry");
+        if (msg.sender != registry) revert OnlyRegistry();
         Market storage m = markets[_marketId];
-        require(m.exists, "ExamplePredictionMarket: market not found");
-        require(m.settler == address(0), "ExamplePredictionMarket: settler already set");
+        if (!m.exists) revert MarketNotFound();
+        if (m.settler != address(0)) revert SettlerAlreadySet();
 
         m.settler = _settler;
     }
@@ -173,10 +191,10 @@ contract ExamplePredictionMarket is IChaosOracleSettleable {
     /// @inheritdoc IChaosOracleSettleable
     function onSettlement(uint256 _marketId, uint8 _outcome, bytes32 _proofHash) external {
         Market storage m = markets[_marketId];
-        require(m.exists, "ExamplePredictionMarket: market not found");
-        require(msg.sender == m.settler, "ExamplePredictionMarket: only settler");
-        require(!m.settled, "ExamplePredictionMarket: already settled");
-        require(_outcome <= 1, "ExamplePredictionMarket: invalid outcome");
+        if (!m.exists) revert MarketNotFound();
+        if (msg.sender != m.settler) revert OnlySettler();
+        if (m.settled) revert AlreadySettled();
+        if (_outcome > 1) revert InvalidOutcome();
 
         m.outcome = _outcome;
         m.proofHash = _proofHash;
@@ -193,12 +211,12 @@ contract ExamplePredictionMarket is IChaosOracleSettleable {
     /// @param _marketId The market ID
     function claimWinnings(uint256 _marketId) external {
         Market storage m = markets[_marketId];
-        require(m.settled, "ExamplePredictionMarket: not settled");
-        require(!claimed[_marketId][msg.sender], "ExamplePredictionMarket: already claimed");
+        if (!m.settled) revert NotSettled();
+        if (claimed[_marketId][msg.sender]) revert AlreadyClaimed();
 
         uint8 winningOption = m.outcome;
         uint256 userBet = bets[_marketId][msg.sender][winningOption];
-        require(userBet > 0, "ExamplePredictionMarket: no winning bet");
+        if (userBet == 0) revert NoWinningBet();
 
         claimed[_marketId][msg.sender] = true;
 
@@ -211,7 +229,7 @@ contract ExamplePredictionMarket is IChaosOracleSettleable {
         uint256 payout = (userBet * totalPool) / winPool;
 
         (bool success,) = msg.sender.call{value: payout}("");
-        require(success, "ExamplePredictionMarket: transfer failed");
+        if (!success) revert TransferFailed();
 
         emit WinningsClaimed(_marketId, msg.sender, payout);
     }

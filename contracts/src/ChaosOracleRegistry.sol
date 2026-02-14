@@ -17,6 +17,25 @@ import {MarketKey} from "./libraries/MarketKey.sol";
 contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
     using MarketKey for address;
 
+    // ============ Custom Errors ============
+
+    error ZeroAddress();
+    error NotCREForwarder();
+    error UnauthorizedWorkflow();
+    error NotActiveStudio();
+    error StudioAlreadySettled();
+    error NoReward();
+    error EmptyQuestion();
+    error TooFewOptions();
+    error DeadlineInPast();
+    error AlreadyRegistered();
+    error AlreadyHasStudio();
+    error MarketNotFound();
+    error DeadlineNotReached();
+    error StudioAlreadyExists();
+    error InitializeFailed();
+    error CloseEpochFailed();
+
     // ============ Structs ============
 
     struct PendingMarket {
@@ -81,18 +100,18 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
     // ============ Modifiers ============
 
     modifier onlyCRE(bytes calldata creReport) {
-        require(msg.sender == creForwarder, "ChaosOracleRegistry: not CRE forwarder");
+        if (msg.sender != creForwarder) revert NotCREForwarder();
         if (authorizedWorkflowId != bytes32(0)) {
-            // Decode workflowId from the first 32 bytes of creReport
             bytes32 workflowId = abi.decode(creReport[:32], (bytes32));
-            require(workflowId == authorizedWorkflowId, "ChaosOracleRegistry: unauthorized workflow");
+            if (workflowId != authorizedWorkflowId) revert UnauthorizedWorkflow();
         }
         _;
     }
 
     modifier onlyActiveStudio() {
-        require(activeStudios[msg.sender].studio == msg.sender, "ChaosOracleRegistry: not active studio");
-        require(!activeStudios[msg.sender].settled, "ChaosOracleRegistry: already settled");
+        ActiveStudio storage as_ = activeStudios[msg.sender];
+        if (as_.studio != msg.sender) revert NotActiveStudio();
+        if (as_.settled) revert StudioAlreadySettled();
         _;
     }
 
@@ -112,12 +131,12 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
         address _chaosChainRegistry,
         address _rewardsDistributor
     ) Ownable(msg.sender) {
-        require(_chaosCore != address(0), "ChaosOracleRegistry: zero chaosCore");
-        require(_logicModuleTemplate != address(0), "ChaosOracleRegistry: zero logicModule");
-        require(_creForwarder != address(0), "ChaosOracleRegistry: zero creForwarder");
-        require(_studioProxyFactory != address(0), "ChaosOracleRegistry: zero factory");
-        require(_chaosChainRegistry != address(0), "ChaosOracleRegistry: zero ccRegistry");
-        require(_rewardsDistributor != address(0), "ChaosOracleRegistry: zero rewards");
+        if (_chaosCore == address(0)) revert ZeroAddress();
+        if (_logicModuleTemplate == address(0)) revert ZeroAddress();
+        if (_creForwarder == address(0)) revert ZeroAddress();
+        if (_studioProxyFactory == address(0)) revert ZeroAddress();
+        if (_chaosChainRegistry == address(0)) revert ZeroAddress();
+        if (_rewardsDistributor == address(0)) revert ZeroAddress();
 
         chaosCore = _chaosCore;
         logicModuleTemplate = _logicModuleTemplate;
@@ -146,19 +165,21 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
         string[] calldata options,
         uint256 deadline
     ) external payable {
-        require(msg.value > 0, "ChaosOracleRegistry: no reward");
-        require(bytes(question).length > 0, "ChaosOracleRegistry: empty question");
-        require(options.length >= 2, "ChaosOracleRegistry: need >= 2 options");
-        require(deadline > block.timestamp, "ChaosOracleRegistry: deadline in past");
+        if (msg.value == 0) revert NoReward();
+        if (bytes(question).length == 0) revert EmptyQuestion();
+        if (options.length < 2) revert TooFewOptions();
+        if (deadline <= block.timestamp) revert DeadlineInPast();
 
         bytes32 key = msg.sender.derive(marketId);
-        require(!pendingMarkets[key].exists, "ChaosOracleRegistry: already registered");
-        require(keyToStudio[key] == address(0), "ChaosOracleRegistry: already has studio");
+        if (pendingMarkets[key].exists) revert AlreadyRegistered();
+        if (keyToStudio[key] != address(0)) revert AlreadyHasStudio();
 
         // Copy options to storage
-        string[] memory opts = new string[](options.length);
-        for (uint256 i = 0; i < options.length; i++) {
+        uint256 optLen = options.length;
+        string[] memory opts = new string[](optLen);
+        for (uint256 i = 0; i < optLen;) {
             opts[i] = options[i];
+            unchecked { ++i; }
         }
 
         pendingMarkets[key] = PendingMarket({
@@ -180,9 +201,9 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
     /// @inheritdoc IChaosOracleRegistry
     function createStudioForMarket(bytes32 key, bytes calldata creReport) external onlyCRE(creReport) {
         PendingMarket storage pm = pendingMarkets[key];
-        require(pm.exists, "ChaosOracleRegistry: market not found");
-        require(block.timestamp >= pm.deadline, "ChaosOracleRegistry: deadline not reached");
-        require(keyToStudio[key] == address(0), "ChaosOracleRegistry: studio already exists");
+        if (!pm.exists) revert MarketNotFound();
+        if (block.timestamp < pm.deadline) revert DeadlineNotReached();
+        if (keyToStudio[key] != address(0)) revert StudioAlreadyExists();
 
         // Deploy StudioProxy directly via StudioProxyFactory (permissionless).
         // This bypasses ChaosCore.createStudio() which requires onlyOwner registration
@@ -203,12 +224,9 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
             abi.encode(address(this), pm.market, pm.marketId, pm.question, pm.options)
         );
         (bool success,) = proxy.call(initData);
-        require(success, "ChaosOracleRegistry: initialize failed");
+        if (!success) revert InitializeFailed();
 
-        // Set this studio as the authorized settler on the prediction market
-        IChaosOracleSettleable(pm.market).setSettler(pm.marketId, proxy);
-
-        // Track the active studio (studioId = 0 since not registered through ChaosCore)
+        // CEI: Write state BEFORE calling into untrusted prediction market
         activeStudios[proxy] = ActiveStudio({
             key: key,
             studio: proxy,
@@ -220,18 +238,21 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
         activeStudioList.push(proxy);
         keyToStudio[key] = proxy;
 
+        // Interaction: call into prediction market (potentially untrusted)
+        IChaosOracleSettleable(pm.market).setSettler(pm.marketId, proxy);
+
         emit StudioCreated(key, proxy, 0, pm.market, pm.marketId);
     }
 
     /// @inheritdoc IChaosOracleRegistry
     function closeStudioEpoch(address studio, bytes calldata creReport) external onlyCRE(creReport) {
         ActiveStudio storage as_ = activeStudios[studio];
-        require(as_.studio == studio, "ChaosOracleRegistry: not active studio");
-        require(!as_.settled, "ChaosOracleRegistry: already settled");
+        if (as_.studio != studio) revert NotActiveStudio();
+        if (as_.settled) revert StudioAlreadySettled();
 
         // Call closeEpoch on the studio (via fallback → delegatecall to PredictionSettlementLogic)
         (bool success,) = studio.call(abi.encodeWithSignature("closeEpoch()"));
-        require(success, "ChaosOracleRegistry: closeEpoch failed");
+        if (!success) revert CloseEpochFailed();
     }
 
     // ============ Studio Callbacks ============
@@ -253,45 +274,51 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
 
     /// @inheritdoc IChaosOracleRegistry
     function getMarketsReadyForSettlement() external view returns (bytes32[] memory keys) {
+        uint256 len = pendingMarketKeys.length;
         // Count first
         uint256 count = 0;
-        for (uint256 i = 0; i < pendingMarketKeys.length; i++) {
+        for (uint256 i = 0; i < len;) {
             bytes32 key = pendingMarketKeys[i];
             PendingMarket storage pm = pendingMarkets[key];
             if (pm.exists && block.timestamp >= pm.deadline && keyToStudio[key] == address(0)) {
-                count++;
+                unchecked { ++count; }
             }
+            unchecked { ++i; }
         }
 
         // Build result
         keys = new bytes32[](count);
         uint256 idx = 0;
-        for (uint256 i = 0; i < pendingMarketKeys.length; i++) {
+        for (uint256 i = 0; i < len;) {
             bytes32 key = pendingMarketKeys[i];
             PendingMarket storage pm = pendingMarkets[key];
             if (pm.exists && block.timestamp >= pm.deadline && keyToStudio[key] == address(0)) {
                 keys[idx++] = key;
             }
+            unchecked { ++i; }
         }
     }
 
     /// @inheritdoc IChaosOracleRegistry
     function getActiveStudios() external view returns (address[] memory studios) {
+        uint256 len = activeStudioList.length;
         // Count unsettled
         uint256 count = 0;
-        for (uint256 i = 0; i < activeStudioList.length; i++) {
+        for (uint256 i = 0; i < len;) {
             if (!activeStudios[activeStudioList[i]].settled) {
-                count++;
+                unchecked { ++count; }
             }
+            unchecked { ++i; }
         }
 
         // Build result
         studios = new address[](count);
         uint256 idx = 0;
-        for (uint256 i = 0; i < activeStudioList.length; i++) {
+        for (uint256 i = 0; i < len;) {
             if (!activeStudios[activeStudioList[i]].settled) {
                 studios[idx++] = activeStudioList[i];
             }
+            unchecked { ++i; }
         }
     }
 
@@ -331,9 +358,10 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
     function _bytes32ToHexString(bytes32 value) internal pure returns (string memory) {
         bytes memory alphabet = "0123456789abcdef";
         bytes memory str = new bytes(8);
-        for (uint256 i = 0; i < 4; i++) {
+        for (uint256 i = 0; i < 4;) {
             str[i * 2] = alphabet[uint8(value[i] >> 4)];
             str[1 + i * 2] = alphabet[uint8(value[i] & 0x0f)];
+            unchecked { ++i; }
         }
         return string(str);
     }

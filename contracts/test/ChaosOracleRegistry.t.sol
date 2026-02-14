@@ -48,17 +48,17 @@ contract ChaosOracleRegistryTest is Test {
     }
 
     function test_constructor_revertsZeroChaosCore() public {
-        vm.expectRevert("ChaosOracleRegistry: zero chaosCore");
+        vm.expectRevert(ChaosOracleRegistry.ZeroAddress.selector);
         new ChaosOracleRegistry(address(0), address(logic), creForwarder, address(proxyFactory), chaosChainRegistry, rewardsDistributor);
     }
 
     function test_constructor_revertsZeroLogicModule() public {
-        vm.expectRevert("ChaosOracleRegistry: zero logicModule");
+        vm.expectRevert(ChaosOracleRegistry.ZeroAddress.selector);
         new ChaosOracleRegistry(address(chaosCore), address(0), creForwarder, address(proxyFactory), chaosChainRegistry, rewardsDistributor);
     }
 
     function test_constructor_revertsZeroCreForwarder() public {
-        vm.expectRevert("ChaosOracleRegistry: zero creForwarder");
+        vm.expectRevert(ChaosOracleRegistry.ZeroAddress.selector);
         new ChaosOracleRegistry(address(chaosCore), address(logic), address(0), address(proxyFactory), chaosChainRegistry, rewardsDistributor);
     }
 
@@ -107,7 +107,7 @@ contract ChaosOracleRegistryTest is Test {
         string[] memory opts = new string[](2);
         opts[0] = "Yes";
         opts[1] = "No";
-        vm.expectRevert("ChaosOracleRegistry: no reward");
+        vm.expectRevert(ChaosOracleRegistry.NoReward.selector);
         registry.registerForSettlement(1, "Q?", opts, block.timestamp + 1);
     }
 
@@ -115,14 +115,14 @@ contract ChaosOracleRegistryTest is Test {
         string[] memory opts = new string[](2);
         opts[0] = "Yes";
         opts[1] = "No";
-        vm.expectRevert("ChaosOracleRegistry: empty question");
+        vm.expectRevert(ChaosOracleRegistry.EmptyQuestion.selector);
         registry.registerForSettlement{value: 1 ether}(1, "", opts, block.timestamp + 1);
     }
 
     function test_registerForSettlement_revertsTooFewOptions() public {
         string[] memory opts = new string[](1);
         opts[0] = "Yes";
-        vm.expectRevert("ChaosOracleRegistry: need >= 2 options");
+        vm.expectRevert(ChaosOracleRegistry.TooFewOptions.selector);
         registry.registerForSettlement{value: 1 ether}(1, "Q?", opts, block.timestamp + 1);
     }
 
@@ -130,7 +130,7 @@ contract ChaosOracleRegistryTest is Test {
         string[] memory opts = new string[](2);
         opts[0] = "Yes";
         opts[1] = "No";
-        vm.expectRevert("ChaosOracleRegistry: deadline in past");
+        vm.expectRevert(ChaosOracleRegistry.DeadlineInPast.selector);
         registry.registerForSettlement{value: 1 ether}(1, "Q?", opts, block.timestamp - 1);
     }
 
@@ -142,7 +142,7 @@ contract ChaosOracleRegistryTest is Test {
 
         registry.registerForSettlement{value: 1 ether}(1, "Q?", opts, deadline);
 
-        vm.expectRevert("ChaosOracleRegistry: already registered");
+        vm.expectRevert(ChaosOracleRegistry.AlreadyRegistered.selector);
         registry.registerForSettlement{value: 1 ether}(1, "Q?", opts, deadline);
     }
 
@@ -175,12 +175,12 @@ contract ChaosOracleRegistryTest is Test {
     // ============ CRE Access Control Tests ============
 
     function test_createStudioForMarket_revertsNotCRE() public {
-        vm.expectRevert("ChaosOracleRegistry: not CRE forwarder");
+        vm.expectRevert(ChaosOracleRegistry.NotCREForwarder.selector);
         registry.createStudioForMarket(bytes32("key"), bytes(""));
     }
 
     function test_closeStudioEpoch_revertsNotCRE() public {
-        vm.expectRevert("ChaosOracleRegistry: not CRE forwarder");
+        vm.expectRevert(ChaosOracleRegistry.NotCREForwarder.selector);
         registry.closeStudioEpoch(address(0x1), bytes(""));
     }
 
@@ -189,7 +189,7 @@ contract ChaosOracleRegistryTest is Test {
 
         bytes memory creReport = abi.encode(bytes32("wrong-id"));
         vm.prank(creForwarder);
-        vm.expectRevert("ChaosOracleRegistry: unauthorized workflow");
+        vm.expectRevert(ChaosOracleRegistry.UnauthorizedWorkflow.selector);
         registry.createStudioForMarket(bytes32("key"), creReport);
     }
 
@@ -249,19 +249,19 @@ contract ChaosOracleRegistryTest is Test {
         bytes memory creReport = abi.encode(bytes32(0));
 
         vm.prank(creForwarder);
-        vm.expectRevert("ChaosOracleRegistry: deadline not reached");
+        vm.expectRevert(ChaosOracleRegistry.DeadlineNotReached.selector);
         registry.createStudioForMarket(key, creReport);
     }
 
     // ============ Studio Callback Tests ============
 
     function test_onScoresSubmitted_revertsNotStudio() public {
-        vm.expectRevert("ChaosOracleRegistry: not active studio");
+        vm.expectRevert(ChaosOracleRegistry.NotActiveStudio.selector);
         registry.onScoresSubmitted(5, 10);
     }
 
     function test_onStudioSettled_revertsNotStudio() public {
-        vm.expectRevert("ChaosOracleRegistry: not active studio");
+        vm.expectRevert(ChaosOracleRegistry.NotActiveStudio.selector);
         registry.onStudioSettled(0, bytes32("proof"));
     }
 
