@@ -1,4 +1,4 @@
-# ChaosOracle Demo
+# 🔮 ChaosOracle Demo
 
 Local end-to-end testing of the full ChaosOracle settlement lifecycle.
 

@@ -1,4 +1,4 @@
-# ChaosOracle Smart Contracts
+# 🔮 ChaosOracle Smart Contracts
 
 Foundry project containing the core settlement framework contracts and an example prediction market.
 

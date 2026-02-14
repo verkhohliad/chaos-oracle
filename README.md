@@ -1,4 +1,4 @@
-# ChaosOracle
+# 🔮 ChaosOracle
 
 **AI-Powered Prediction Market Settlement**
 

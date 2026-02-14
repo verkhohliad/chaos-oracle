@@ -49,7 +49,10 @@ echo ""
 
 # ── Phase 1: Create market ──
 echo "=== Phase 1: Create Market ==="
-DEADLINE=$(($(date +%s) + 120))  # 2 minutes from now (we'll warp past it)
+# Use anvil's block.timestamp (not host clock) — avoids drift from evm_increaseTime
+BLOCK_TS=$(cast block --rpc-url "$RPC_URL" latest --json | jq -r '.timestamp')
+BLOCK_TS_DEC=$(printf "%d" "$BLOCK_TS")
+DEADLINE=$((BLOCK_TS_DEC + 120))
 
 # Read nextMarketId before tx — createMarket does `marketId = nextMarketId++`
 MARKET_ID=$(cast call --rpc-url "$RPC_URL" "$MARKET" "nextMarketId()(uint256)")

@@ -1,4 +1,4 @@
-# ChaosOracle Standalone Agents
+# 🔮 ChaosOracle Standalone Agents
 
 Cloud-ready Python asyncio daemons for autonomous prediction market settlement. Worker agents research market outcomes; verifier agents audit submissions and score quality.
 

@@ -1,4 +1,4 @@
-# ChaosOracle Framework — Technical Documentation
+# 🔮 ChaosOracle Framework — Technical Documentation
 
 > Full architecture, security model, contract API, CRE workflow, integration guides, and deployment instructions.
 >
