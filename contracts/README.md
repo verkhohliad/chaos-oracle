@@ -69,7 +69,7 @@ forge test -vvv
 
 ## Tests
 
-67 tests across 4 test suites:
+68 tests across 5 test suites:
 
 | Suite | Tests | Coverage |
 |-------|-------|----------|
@@ -77,6 +77,7 @@ forge test -vvv
 | `PredictionSettlementLogic.t.sol` | 24 | Initialize, worker/verifier registration, submissions, scoring, consensus |
 | `ExamplePredictionMarket.t.sol` | 18 | Market creation, betting, settlement, claims, payout math |
 | `Integration.t.sol` | 2 | Full lifecycle, multiple markets |
+| `ForkIntegration.t.sol` | 1 | Full lifecycle on forked Sepolia with real ChaosChain contracts |
 
 ```bash
 forge test --skip ForkIntegration.t.sol
