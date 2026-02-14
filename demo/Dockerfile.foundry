@@ -1,0 +1,15 @@
+FROM ghcr.io/foundry-rs/foundry:stable
+
+# Install jq for JSON parsing in scripts (foundry image runs as non-root by default)
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends jq coreutils && rm -rf /var/lib/apt/lists/*
+
+# Copy contracts source for forge create
+WORKDIR /app
+COPY contracts/src/ src/
+COPY contracts/lib/ lib/
+COPY contracts/foundry.toml foundry.toml
+
+# Copy demo scripts
+COPY demo/scripts/ scripts/
+RUN chmod +x scripts/*.sh

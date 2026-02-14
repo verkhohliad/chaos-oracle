@@ -1,0 +1,213 @@
+services:
+  # ── Anvil: Sepolia Fork ──
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:stable
+    entrypoint: ["anvil"]
+    command:
+      - "--fork-url"
+      - "${SEPOLIA_RPC}"
+      - "--host"
+      - "0.0.0.0"
+      - "--block-time"
+      - "2"
+      - "--chain-id"
+      - "11155111"
+    ports:
+      - "8545:8545"
+    healthcheck:
+      test: ["CMD", "cast", "block-number", "--rpc-url", "http://localhost:8545"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - shared:/shared
+
+  # ── Deployer: One-shot contract deployment ──
+  deployer:
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile.foundry
+    entrypoint: ["bash"]
+    command: ["/app/scripts/deploy.sh"]
+    environment:
+      - RPC_URL=http://anvil:8545
+      - DEPLOYER_PRIVATE_KEY=${DEPLOYER_PRIVATE_KEY}
+      - SHARED_DIR=/shared
+    depends_on:
+      anvil:
+        condition: service_healthy
+    volumes:
+      - shared:/shared
+
+  # ── Orchestrator: Drives the lifecycle (simulates CRE) ──
+  orchestrator:
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile.foundry
+    entrypoint: ["bash"]
+    command: ["/app/scripts/orchestrate.sh"]
+    environment:
+      - RPC_URL=http://anvil:8545
+      - DEPLOYER_PRIVATE_KEY=${DEPLOYER_PRIVATE_KEY}
+      - SHARED_DIR=/shared
+    depends_on:
+      deployer:
+        condition: service_completed_successfully
+    volumes:
+      - shared:/shared
+
+  # ── Workers: 3 real agents with CHAOSCHAIN_MODE=local ──
+  worker-1:
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile.agents
+    entrypoint: >
+      sh -c '
+        echo "Waiting for addresses.json..."
+        while [ ! -f /shared/addresses.json ]; do sleep 1; done
+        export CHAOS_ORACLE_REGISTRY_ADDRESS=$$(python -c "import json; print(json.load(open(\"/shared/addresses.json\"))[\"registry\"])")
+        echo "Registry: $$CHAOS_ORACLE_REGISTRY_ADDRESS"
+        python -m worker.main
+      '
+    environment:
+      - CHAOSCHAIN_MODE=local
+      - SEPOLIA_RPC_URL=http://anvil:8545
+      - WORKER_PRIVATE_KEY=${WORKER1_KEY}
+      - POLL_INTERVAL_SECONDS=5
+      - OPENAI_MODEL=gpt-5-2025-08-07
+    depends_on:
+      deployer:
+        condition: service_completed_successfully
+    volumes:
+      - shared:/shared
+    restart: "no"
+
+  worker-2:
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile.agents
+    entrypoint: >
+      sh -c '
+        echo "Waiting for addresses.json..."
+        while [ ! -f /shared/addresses.json ]; do sleep 1; done
+        export CHAOS_ORACLE_REGISTRY_ADDRESS=$$(python -c "import json; print(json.load(open(\"/shared/addresses.json\"))[\"registry\"])")
+        echo "Registry: $$CHAOS_ORACLE_REGISTRY_ADDRESS"
+        python -m worker.main
+      '
+    environment:
+      - CHAOSCHAIN_MODE=local
+      - SEPOLIA_RPC_URL=http://anvil:8545
+      - WORKER_PRIVATE_KEY=${WORKER2_KEY}
+      - POLL_INTERVAL_SECONDS=5
+      - OPENAI_MODEL=gpt-4.1-2025-04-14
+    depends_on:
+      deployer:
+        condition: service_completed_successfully
+    volumes:
+      - shared:/shared
+    restart: "no"
+
+  worker-3:
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile.agents
+    entrypoint: >
+      sh -c '
+        echo "Waiting for addresses.json..."
+        while [ ! -f /shared/addresses.json ]; do sleep 1; done
+        export CHAOS_ORACLE_REGISTRY_ADDRESS=$$(python -c "import json; print(json.load(open(\"/shared/addresses.json\"))[\"registry\"])")
+        echo "Registry: $$CHAOS_ORACLE_REGISTRY_ADDRESS"
+        python -m worker.main
+      '
+    environment:
+      - CHAOSCHAIN_MODE=local
+      - SEPOLIA_RPC_URL=http://anvil:8545
+      - WORKER_PRIVATE_KEY=${WORKER3_KEY}
+      - WORKER_FORCED_OUTCOME=1
+      - POLL_INTERVAL_SECONDS=5
+      - OPENAI_MODEL=gpt-5-mini-2025-08-07
+    depends_on:
+      deployer:
+        condition: service_completed_successfully
+    volumes:
+      - shared:/shared
+    restart: "no"
+
+  # ── Verifiers: 3 real agents with CHAOSCHAIN_MODE=local ──
+  verifier-1:
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile.agents
+    entrypoint: >
+      sh -c '
+        echo "Waiting for addresses.json..."
+        while [ ! -f /shared/addresses.json ]; do sleep 1; done
+        export CHAOS_ORACLE_REGISTRY_ADDRESS=$$(python -c "import json; print(json.load(open(\"/shared/addresses.json\"))[\"registry\"])")
+        echo "Registry: $$CHAOS_ORACLE_REGISTRY_ADDRESS"
+        python -m verifier.main
+      '
+    environment:
+      - CHAOSCHAIN_MODE=local
+      - SEPOLIA_RPC_URL=http://anvil:8545
+      - VERIFIER_PRIVATE_KEY=${VERIFIER1_KEY}
+      - POLL_INTERVAL_SECONDS=5
+      - OPENAI_MODEL=gpt-5-2025-08-07
+    depends_on:
+      deployer:
+        condition: service_completed_successfully
+    volumes:
+      - shared:/shared
+    restart: "no"
+
+  verifier-2:
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile.agents
+    entrypoint: >
+      sh -c '
+        echo "Waiting for addresses.json..."
+        while [ ! -f /shared/addresses.json ]; do sleep 1; done
+        export CHAOS_ORACLE_REGISTRY_ADDRESS=$$(python -c "import json; print(json.load(open(\"/shared/addresses.json\"))[\"registry\"])")
+        echo "Registry: $$CHAOS_ORACLE_REGISTRY_ADDRESS"
+        python -m verifier.main
+      '
+    environment:
+      - CHAOSCHAIN_MODE=local
+      - SEPOLIA_RPC_URL=http://anvil:8545
+      - VERIFIER_PRIVATE_KEY=${VERIFIER2_KEY}
+      - POLL_INTERVAL_SECONDS=5
+      - OPENAI_MODEL=gpt-4.1-2025-04-14
+    depends_on:
+      deployer:
+        condition: service_completed_successfully
+    volumes:
+      - shared:/shared
+    restart: "no"
+
+  verifier-3:
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile.agents
+    entrypoint: >
+      sh -c '
+        echo "Waiting for addresses.json..."
+        while [ ! -f /shared/addresses.json ]; do sleep 1; done
+        export CHAOS_ORACLE_REGISTRY_ADDRESS=$$(python -c "import json; print(json.load(open(\"/shared/addresses.json\"))[\"registry\"])")
+        echo "Registry: $$CHAOS_ORACLE_REGISTRY_ADDRESS"
+        python -m verifier.main
+      '
+    environment:
+      - CHAOSCHAIN_MODE=local
+      - SEPOLIA_RPC_URL=http://anvil:8545
+      - VERIFIER_PRIVATE_KEY=${VERIFIER3_KEY}
+      - POLL_INTERVAL_SECONDS=5
+      - OPENAI_MODEL=gpt-5-mini-2025-08-07
+    depends_on:
+      deployer:
+        condition: service_completed_successfully
+    volumes:
+      - shared:/shared
+    restart: "no"
+
+volumes:
+  shared:
