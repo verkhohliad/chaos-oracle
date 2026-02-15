@@ -137,23 +137,13 @@ contract ExamplePredictionMarketTest is Test {
 
     // ============ Settlement Tests ============
 
-    function test_setSettler_revertsNotRegistry() public {
-        vm.expectRevert(ExamplePredictionMarket.OnlyRegistry.selector);
-        market.setSettler(0, address(0x123));
-    }
-
     function test_onSettlement() public {
         // Create market
         vm.prank(alice);
         market.createMarket{value: 1 ether}("Q?", block.timestamp + 1 days);
 
-        // Set settler via registry
-        address settler = address(0x5E771E);
+        // Settle directly via registry (registry is the only authorized caller)
         vm.prank(address(registry));
-        market.setSettler(0, settler);
-
-        // Settle
-        vm.prank(settler);
         market.onSettlement(0, 0, bytes32("proof"));
 
         (, , , , , uint8 outcome, bool settled) = market.getMarket(0);
@@ -161,14 +151,11 @@ contract ExamplePredictionMarketTest is Test {
         assertTrue(settled);
     }
 
-    function test_onSettlement_revertsNotSettler() public {
+    function test_onSettlement_revertsNotRegistry() public {
         vm.prank(alice);
         market.createMarket{value: 1 ether}("Q?", block.timestamp + 1 days);
 
-        vm.prank(address(registry));
-        market.setSettler(0, address(0x5E771E));
-
-        vm.expectRevert(ExamplePredictionMarket.OnlySettler.selector);
+        vm.expectRevert(ExamplePredictionMarket.OnlyRegistry.selector);
         market.onSettlement(0, 0, bytes32("proof"));
     }
 
@@ -183,12 +170,8 @@ contract ExamplePredictionMarketTest is Test {
         vm.prank(bob);
         market.placeBet{value: 2 ether}(0, 1);
 
-        // Set settler & settle with Yes (0) winning
-        address settler = address(0x5E771E);
+        // Settle with Yes (0) winning — registry calls directly
         vm.prank(address(registry));
-        market.setSettler(0, settler);
-
-        vm.prank(settler);
         market.onSettlement(0, 0, bytes32("proof"));
 
         // Alice claims - she has all 0.9 ETH in Yes pool
@@ -209,11 +192,8 @@ contract ExamplePredictionMarketTest is Test {
         vm.prank(bob);
         market.placeBet{value: 2 ether}(0, 1);
 
-        address settler = address(0x5E771E);
+        // Settle with No (1) winning — registry calls directly
         vm.prank(address(registry));
-        market.setSettler(0, settler);
-
-        vm.prank(settler);
         market.onSettlement(0, 1, bytes32("proof")); // No wins
 
         // Bob claims - he has all 2 ETH in No pool
@@ -239,11 +219,7 @@ contract ExamplePredictionMarketTest is Test {
         vm.prank(alice);
         market.createMarket{value: 1 ether}("Q?", block.timestamp + 1 days);
 
-        address settler = address(0x5E771E);
         vm.prank(address(registry));
-        market.setSettler(0, settler);
-
-        vm.prank(settler);
         market.onSettlement(0, 0, bytes32("proof"));
 
         vm.prank(alice);
@@ -261,11 +237,7 @@ contract ExamplePredictionMarketTest is Test {
         vm.prank(bob);
         market.placeBet{value: 2 ether}(0, 1); // Bob bets No
 
-        address settler = address(0x5E771E);
         vm.prank(address(registry));
-        market.setSettler(0, settler);
-
-        vm.prank(settler);
         market.onSettlement(0, 0, bytes32("proof")); // Yes wins
 
         // Bob tries to claim but he bet on No
@@ -292,12 +264,8 @@ contract ExamplePredictionMarketTest is Test {
         vm.prank(charlie);
         market.placeBet{value: 8 ether}(0, 1);
 
-        // Settle: Yes wins
-        address settler = address(0x5E771E);
+        // Settle: Yes wins — registry calls directly
         vm.prank(address(registry));
-        market.setSettler(0, settler);
-
-        vm.prank(settler);
         market.onSettlement(0, 0, bytes32("proof"));
 
         // Total pool = 9 + 3 + 8 = 20 ETH

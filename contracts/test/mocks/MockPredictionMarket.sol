@@ -8,7 +8,6 @@ import {IChaosOracleSettleable} from "../../src/interfaces/IChaosOracleSettleabl
 ///         Records all calls for assertion in tests.
 contract MockPredictionMarket is IChaosOracleSettleable {
     error OnlyRegistry();
-    error OnlySettler();
 
     address public registry;
 
@@ -16,29 +15,23 @@ contract MockPredictionMarket is IChaosOracleSettleable {
         uint256 marketId;
         uint8 outcome;
         bytes32 proofHash;
-        address settler;
+        address caller;
         bool called;
     }
 
-    mapping(uint256 => address) public settlers;
     mapping(uint256 => SettlementRecord) public settlements;
 
     constructor(address _registry) {
         registry = _registry;
     }
 
-    function setSettler(uint256 marketId, address settler) external override {
-        if (msg.sender != registry) revert OnlyRegistry();
-        settlers[marketId] = settler;
-    }
-
     function onSettlement(uint256 marketId, uint8 outcome, bytes32 proofHash) external override {
-        if (msg.sender != settlers[marketId]) revert OnlySettler();
+        if (msg.sender != registry) revert OnlyRegistry();
         settlements[marketId] = SettlementRecord({
             marketId: marketId,
             outcome: outcome,
             proofHash: proofHash,
-            settler: msg.sender,
+            caller: msg.sender,
             called: true
         });
     }

@@ -3,8 +3,9 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {ChaosOracleRegistry} from "../src/ChaosOracleRegistry.sol";
+import {IChaosOracleRegistry} from "../src/interfaces/IChaosOracleRegistry.sol";
 import {PredictionSettlementLogic} from "../src/PredictionSettlementLogic.sol";
-import {MockChaosCore, MockStudioProxyFactory} from "./mocks/MockChaosCore.sol";
+import {MockChaosCore, MockStudioProxyFactory, MockStudioProxy} from "./mocks/MockChaosCore.sol";
 import {MockPredictionMarket} from "./mocks/MockPredictionMarket.sol";
 import {MarketKey} from "../src/libraries/MarketKey.sol";
 
@@ -179,9 +180,9 @@ contract ChaosOracleRegistryTest is Test {
         registry.createStudioForMarket(bytes32("key"), bytes(""));
     }
 
-    function test_closeStudioEpoch_revertsNotCRE() public {
+    function test_settleWithOutcome_revertsNotCRE() public {
         vm.expectRevert(ChaosOracleRegistry.NotCREForwarder.selector);
-        registry.closeStudioEpoch(address(0x1), bytes(""));
+        registry.settleWithOutcome(address(0x1), 0, bytes32(0), bytes(""));
     }
 
     function test_createStudioForMarket_revertsWrongWorkflowId() public {
@@ -230,8 +231,7 @@ contract ChaosOracleRegistryTest is Test {
         assertEq(storedMarketId, 1);
         assertFalse(settled);
 
-        // Verify settler was set on market
-        assertEq(market.settlers(1), studioAddr);
+        // Verify registry is the authorized caller for settlement (no separate settler needed)
     }
 
     function test_createStudioForMarket_revertsBeforeDeadline() public {
@@ -253,16 +253,112 @@ contract ChaosOracleRegistryTest is Test {
         registry.createStudioForMarket(key, creReport);
     }
 
-    // ============ Studio Callback Tests ============
+    // ============ settleWithOutcome Tests ============
 
-    function test_onScoresSubmitted_revertsNotStudio() public {
-        vm.expectRevert(ChaosOracleRegistry.NotActiveStudio.selector);
-        registry.onScoresSubmitted(5, 10);
+    function test_settleWithOutcome() public {
+        // Setup: register market, create studio
+        MockPredictionMarket market = new MockPredictionMarket(address(registry));
+        vm.deal(address(market), 10 ether);
+        string[] memory opts = new string[](2);
+        opts[0] = "Yes";
+        opts[1] = "No";
+        uint256 deadline = block.timestamp + 1 hours;
+
+        vm.prank(address(market));
+        registry.registerForSettlement{value: 1 ether}(1, "Will ETH hit $5000?", opts, deadline);
+
+        bytes32 key = MarketKey.derive(address(market), 1);
+        vm.warp(deadline + 1);
+
+        bytes memory creReport = abi.encode(bytes32(0));
+        vm.prank(creForwarder);
+        registry.createStudioForMarket(key, creReport);
+
+        address studioAddr = registry.keyToStudio(key);
+
+        // Settle with outcome 0 (Yes)
+        bytes32 proofHash = keccak256("evidence-proof");
+        vm.prank(creForwarder);
+        registry.settleWithOutcome(studioAddr, 0, proofHash, creReport);
+
+        // Verify studio is settled
+        (, , , , , bool settled) = registry.activeStudios(studioAddr);
+        assertTrue(settled);
+
+        // Verify market received the settlement
+        assertTrue(market.wasSettled(1));
+        MockPredictionMarket.SettlementRecord memory record = market.getSettlement(1);
+        assertEq(record.outcome, 0);
+        assertEq(record.proofHash, proofHash);
+        assertEq(record.caller, address(registry)); // Registry calls onSettlement directly
     }
 
-    function test_onStudioSettled_revertsNotStudio() public {
+    function test_settleWithOutcome_revertsNotActiveStudio() public {
+        bytes memory creReport = abi.encode(bytes32(0));
+        vm.prank(creForwarder);
         vm.expectRevert(ChaosOracleRegistry.NotActiveStudio.selector);
-        registry.onStudioSettled(0, bytes32("proof"));
+        registry.settleWithOutcome(address(0x123), 0, bytes32(0), creReport);
+    }
+
+    function test_settleWithOutcome_revertsAlreadySettled() public {
+        // Setup: register market, create studio, settle once
+        MockPredictionMarket market = new MockPredictionMarket(address(registry));
+        vm.deal(address(market), 10 ether);
+        string[] memory opts = new string[](2);
+        opts[0] = "Yes";
+        opts[1] = "No";
+        uint256 deadline = block.timestamp + 1 hours;
+
+        vm.prank(address(market));
+        registry.registerForSettlement{value: 1 ether}(1, "Q?", opts, deadline);
+
+        bytes32 key = MarketKey.derive(address(market), 1);
+        vm.warp(deadline + 1);
+
+        bytes memory creReport = abi.encode(bytes32(0));
+        vm.prank(creForwarder);
+        registry.createStudioForMarket(key, creReport);
+
+        address studioAddr = registry.keyToStudio(key);
+
+        // First settlement succeeds
+        vm.prank(creForwarder);
+        registry.settleWithOutcome(studioAddr, 0, bytes32(0), creReport);
+
+        // Second settlement should revert
+        vm.prank(creForwarder);
+        vm.expectRevert(ChaosOracleRegistry.StudioAlreadySettled.selector);
+        registry.settleWithOutcome(studioAddr, 1, bytes32(0), creReport);
+    }
+
+    function test_settleWithOutcome_emitsEvent() public {
+        // Setup: register market, create studio
+        MockPredictionMarket market = new MockPredictionMarket(address(registry));
+        vm.deal(address(market), 10 ether);
+        string[] memory opts = new string[](2);
+        opts[0] = "Yes";
+        opts[1] = "No";
+        uint256 deadline = block.timestamp + 1 hours;
+
+        vm.prank(address(market));
+        registry.registerForSettlement{value: 1 ether}(1, "Q?", opts, deadline);
+
+        bytes32 key = MarketKey.derive(address(market), 1);
+        vm.warp(deadline + 1);
+
+        bytes memory creReport = abi.encode(bytes32(0));
+        vm.prank(creForwarder);
+        registry.createStudioForMarket(key, creReport);
+
+        address studioAddr = registry.keyToStudio(key);
+        bytes32 proofHash = keccak256("proof");
+
+        // Expect the StudioSettled event
+        vm.expectEmit(true, true, false, true);
+        emit IChaosOracleRegistry.StudioSettled(studioAddr, key, 1, proofHash);
+
+        vm.prank(creForwarder);
+        registry.settleWithOutcome(studioAddr, 1, proofHash, creReport);
     }
 
     // ============ View Tests ============
@@ -272,8 +368,140 @@ contract ChaosOracleRegistryTest is Test {
         assertEq(studios.length, 0);
     }
 
+    function test_getActiveStudios_excludesSettled() public {
+        // Setup: register market, create studio, settle it
+        MockPredictionMarket market = new MockPredictionMarket(address(registry));
+        vm.deal(address(market), 10 ether);
+        string[] memory opts = new string[](2);
+        opts[0] = "Yes";
+        opts[1] = "No";
+        uint256 deadline = block.timestamp + 1 hours;
+
+        vm.prank(address(market));
+        registry.registerForSettlement{value: 1 ether}(1, "Q?", opts, deadline);
+
+        bytes32 key = MarketKey.derive(address(market), 1);
+        vm.warp(deadline + 1);
+
+        bytes memory creReport = abi.encode(bytes32(0));
+        vm.prank(creForwarder);
+        registry.createStudioForMarket(key, creReport);
+
+        address studioAddr = registry.keyToStudio(key);
+
+        // Should have 1 active studio
+        address[] memory studios = registry.getActiveStudios();
+        assertEq(studios.length, 1);
+        assertEq(studios[0], studioAddr);
+
+        // Settle it
+        vm.prank(creForwarder);
+        registry.settleWithOutcome(studioAddr, 0, bytes32(0), creReport);
+
+        // Should have 0 active studios
+        studios = registry.getActiveStudios();
+        assertEq(studios.length, 0);
+    }
+
     function test_canCloseStudio_nonExistent() public view {
         assertFalse(registry.canCloseStudio(address(0x123)));
+    }
+
+    function test_canCloseStudio_activeStudio() public {
+        // Setup: register market, create studio
+        MockPredictionMarket market = new MockPredictionMarket(address(registry));
+        vm.deal(address(market), 10 ether);
+        string[] memory opts = new string[](2);
+        opts[0] = "Yes";
+        opts[1] = "No";
+        uint256 deadline = block.timestamp + 1 hours;
+
+        vm.prank(address(market));
+        registry.registerForSettlement{value: 1 ether}(1, "Q?", opts, deadline);
+
+        bytes32 key = MarketKey.derive(address(market), 1);
+        vm.warp(deadline + 1);
+
+        bytes memory creReport = abi.encode(bytes32(0));
+        vm.prank(creForwarder);
+        registry.createStudioForMarket(key, creReport);
+
+        address studioAddr = registry.keyToStudio(key);
+
+        // Active and unsettled: canClose should be true
+        assertTrue(registry.canCloseStudio(studioAddr));
+
+        // After settlement: canClose should be false
+        vm.prank(creForwarder);
+        registry.settleWithOutcome(studioAddr, 0, bytes32(0), creReport);
+        assertFalse(registry.canCloseStudio(studioAddr));
+    }
+
+    // ============ Studio Escrow Deposit Tests ============
+
+    function test_createStudioForMarket_depositsReward() public {
+        // Setup: register a market with 1 ETH reward
+        MockPredictionMarket mkt = new MockPredictionMarket(address(registry));
+        vm.deal(address(mkt), 10 ether);
+        string[] memory opts = new string[](2);
+        opts[0] = "Yes";
+        opts[1] = "No";
+        uint256 deadline = block.timestamp + 1 hours;
+
+        vm.prank(address(mkt));
+        registry.registerForSettlement{value: 1 ether}(1, "Will ETH hit $5000?", opts, deadline);
+
+        bytes32 key = MarketKey.derive(address(mkt), 1);
+        vm.warp(deadline + 1);
+
+        bytes memory creReport = abi.encode(bytes32(0));
+        vm.prank(creForwarder);
+        registry.createStudioForMarket(key, creReport);
+
+        // Verify reward was deposited to the studio proxy
+        address studioAddr = registry.keyToStudio(key);
+        assertEq(studioAddr.balance, 1 ether, "Studio proxy should hold the reward");
+        assertEq(MockStudioProxy(payable(studioAddr)).depositedAmount(), 1 ether,
+            "depositedAmount should equal the reward");
+    }
+
+    function test_createStudioForMarket_registryBalanceDeducted() public {
+        // Setup: register two markets
+        MockPredictionMarket mkt = new MockPredictionMarket(address(registry));
+        vm.deal(address(mkt), 10 ether);
+        string[] memory opts = new string[](2);
+        opts[0] = "Yes";
+        opts[1] = "No";
+        uint256 deadline = block.timestamp + 1 hours;
+
+        vm.prank(address(mkt));
+        registry.registerForSettlement{value: 2 ether}(1, "Market 1?", opts, deadline);
+        vm.prank(address(mkt));
+        registry.registerForSettlement{value: 3 ether}(2, "Market 2?", opts, deadline);
+
+        // Registry should hold 5 ETH total
+        assertEq(address(registry).balance, 5 ether, "Registry should hold both rewards");
+
+        // Create studio for first market
+        bytes32 key1 = MarketKey.derive(address(mkt), 1);
+        vm.warp(deadline + 1);
+
+        bytes memory creReport = abi.encode(bytes32(0));
+        vm.prank(creForwarder);
+        registry.createStudioForMarket(key1, creReport);
+
+        // Registry balance should decrease by 2 ETH (first reward)
+        assertEq(address(registry).balance, 3 ether,
+            "Registry should have 3 ETH after first studio creation");
+
+        // Create studio for second market
+        bytes32 key2 = MarketKey.derive(address(mkt), 2);
+        vm.prank(creForwarder);
+        registry.createStudioForMarket(key2, creReport);
+
+        // Registry balance should be 0 now
+        assertEq(address(registry).balance, 0,
+            "Registry should have 0 ETH after both studios created");
     }
 
     // ============ Helpers ============
