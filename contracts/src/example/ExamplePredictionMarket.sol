@@ -12,7 +12,7 @@ import {IChaosOracleRegistry} from "../interfaces/IChaosOracleRegistry.sol";
 ///      1. Creator calls createMarket() with ETH (10% goes to Registry as settlement reward)
 ///      2. Users call placeBet() with ETH on Yes (0) or No (1)
 ///      3. After deadline, CRE triggers studio creation, agents do settlement work
-///      4. Studio calls onSettlement() with the winning outcome
+///      4. Registry calls onSettlement() with the winning outcome
 ///      5. Winners call claimWinnings() to receive pro-rata from the losing pool
 contract ExamplePredictionMarket is IChaosOracleSettleable {
     // ============ Custom Errors ============
@@ -26,8 +26,6 @@ contract ExamplePredictionMarket is IChaosOracleSettleable {
     error DeadlinePassed();
     error InvalidOption();
     error OnlyRegistry();
-    error SettlerAlreadySet();
-    error OnlySettler();
     error InvalidOutcome();
     error NotSettled();
     error AlreadyClaimed();
@@ -42,7 +40,6 @@ contract ExamplePredictionMarket is IChaosOracleSettleable {
         uint256[2] pools;       // [Yes pool, No pool]
         uint8 outcome;          // 0=Yes, 1=No, 255=unresolved
         bytes32 proofHash;
-        address settler;        // StudioProxy authorized to settle
         bool settled;
         bool exists;
     }
@@ -67,6 +64,13 @@ contract ExamplePredictionMarket is IChaosOracleSettleable {
     /// @notice Settlement reward percentage (10%)
     uint256 public constant SETTLEMENT_REWARD_BPS = 1000;
     uint256 public constant BPS_DENOMINATOR = 10000;
+
+    // ============ Modifiers ============
+
+    modifier onlyChaosOracleRegistry() {
+        if (msg.sender != registry) revert OnlyRegistry();
+        _;
+    }
 
     // ============ Events ============
 
@@ -134,7 +138,6 @@ contract ExamplePredictionMarket is IChaosOracleSettleable {
             pools: [seedBet, uint256(0)],
             outcome: 255, // unresolved
             proofHash: bytes32(0),
-            settler: address(0),
             settled: false,
             exists: true
         });
@@ -179,20 +182,9 @@ contract ExamplePredictionMarket is IChaosOracleSettleable {
     // ============ IChaosOracleSettleable ============
 
     /// @inheritdoc IChaosOracleSettleable
-    function setSettler(uint256 _marketId, address _settler) external {
-        if (msg.sender != registry) revert OnlyRegistry();
+    function onSettlement(uint256 _marketId, uint8 _outcome, bytes32 _proofHash) external onlyChaosOracleRegistry {
         Market storage m = markets[_marketId];
         if (!m.exists) revert MarketNotFound();
-        if (m.settler != address(0)) revert SettlerAlreadySet();
-
-        m.settler = _settler;
-    }
-
-    /// @inheritdoc IChaosOracleSettleable
-    function onSettlement(uint256 _marketId, uint8 _outcome, bytes32 _proofHash) external {
-        Market storage m = markets[_marketId];
-        if (!m.exists) revert MarketNotFound();
-        if (msg.sender != m.settler) revert OnlySettler();
         if (m.settled) revert AlreadySettled();
         if (_outcome > 1) revert InvalidOutcome();
 

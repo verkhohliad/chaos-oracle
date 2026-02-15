@@ -11,7 +11,7 @@ import {MarketKey} from "./libraries/MarketKey.sol";
 /// @title ChaosOracleRegistry
 /// @notice Central hub bridging prediction markets to ChaosChain studios for settlement.
 ///         Prediction markets register here, CRE workflows trigger studio creation and
-///         epoch closure, and studios report back settlement results.
+///         settlement, passing the CRE workflow computed consensus outcome.
 /// @dev The Registry is the single entry point for the ChaosOracle protocol.
 ///      It coordinates between prediction markets, ChaosChain ChaosCore, and Chainlink CRE.
 contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
@@ -34,7 +34,7 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
     error DeadlineNotReached();
     error StudioAlreadyExists();
     error InitializeFailed();
-    error CloseEpochFailed();
+    error SettlementFailed();
 
     // ============ Structs ============
 
@@ -105,13 +105,6 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
             bytes32 workflowId = abi.decode(creReport[:32], (bytes32));
             if (workflowId != authorizedWorkflowId) revert UnauthorizedWorkflow();
         }
-        _;
-    }
-
-    modifier onlyActiveStudio() {
-        ActiveStudio storage as_ = activeStudios[msg.sender];
-        if (as_.studio != msg.sender) revert NotActiveStudio();
-        if (as_.settled) revert StudioAlreadySettled();
         _;
     }
 
@@ -238,36 +231,25 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
         activeStudioList.push(proxy);
         keyToStudio[key] = proxy;
 
-        // Interaction: call into prediction market (potentially untrusted)
-        IChaosOracleSettleable(pm.market).setSettler(pm.marketId, proxy);
-
         emit StudioCreated(key, proxy, 0, pm.market, pm.marketId);
     }
 
     /// @inheritdoc IChaosOracleRegistry
-    function closeStudioEpoch(address studio, bytes calldata creReport) external onlyCRE(creReport) {
+    function settleWithOutcome(
+        address studio,
+        uint8 outcome,
+        bytes32 proofHash,
+        bytes calldata creReport
+    ) external onlyCRE(creReport) {
         ActiveStudio storage as_ = activeStudios[studio];
         if (as_.studio != studio) revert NotActiveStudio();
         if (as_.settled) revert StudioAlreadySettled();
-
-        // Call closeEpoch on the studio (via fallback → delegatecall to PredictionSettlementLogic)
-        (bool success,) = studio.call(abi.encodeWithSignature("closeEpoch()"));
-        if (!success) revert CloseEpochFailed();
-    }
-
-    // ============ Studio Callbacks ============
-
-    /// @inheritdoc IChaosOracleRegistry
-    function onScoresSubmitted(uint256 totalSubmissions, uint256 totalScores) external onlyActiveStudio {
-        emit StudioScoresSubmitted(msg.sender, totalSubmissions, totalScores);
-    }
-
-    /// @inheritdoc IChaosOracleRegistry
-    function onStudioSettled(uint8 outcome, bytes32 proofHash) external onlyActiveStudio {
-        ActiveStudio storage as_ = activeStudios[msg.sender];
         as_.settled = true;
 
-        emit StudioSettled(msg.sender, as_.key, outcome, proofHash);
+        // Settle the prediction market directly
+        IChaosOracleSettleable(as_.market).onSettlement(as_.marketId, outcome, proofHash);
+
+        emit StudioSettled(studio, as_.key, outcome, proofHash);
     }
 
     // ============ View Functions ============
@@ -326,13 +308,7 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
     function canCloseStudio(address studio) external view returns (bool ready) {
         ActiveStudio storage as_ = activeStudios[studio];
         if (as_.studio != studio || as_.settled) return false;
-
-        // Delegate to PredictionSettlementLogic.canClose() via static call
-        (bool success, bytes memory data) = studio.staticcall(
-            abi.encodeWithSignature("canClose()")
-        );
-        if (!success) return false;
-        return abi.decode(data, (bool));
+        return true;
     }
 
     // ============ Getters for struct fields ============

@@ -27,13 +27,6 @@ interface IChaosOracleRegistry {
         uint256 marketId
     );
 
-    /// @notice Emitted when an active studio reports aggregated score submissions
-    event StudioScoresSubmitted(
-        address indexed studio,
-        uint256 totalSubmissions,
-        uint256 totalScores
-    );
-
     /// @notice Emitted when a studio reaches consensus and settles a market
     event StudioSettled(
         address indexed studio,
@@ -65,22 +58,19 @@ interface IChaosOracleRegistry {
     /// @param creReport The CRE report proving authorized workflow execution
     function createStudioForMarket(bytes32 key, bytes calldata creReport) external;
 
-    /// @notice Close the studio epoch and trigger settlement (CRE-triggered)
+    /// @notice Settle a studio with an off-chain computed outcome (CRE-triggered)
+    /// @dev CRE reads StudioProxy events, fetches evidence from Arweave,
+    ///      computes score-weighted consensus, and calls this function.
     /// @param studio The studio proxy address
+    /// @param outcome The winning outcome index (0-based)
+    /// @param proofHash Hash of concatenated evidence CIDs
     /// @param creReport The CRE report proving authorized workflow execution
-    function closeStudioEpoch(address studio, bytes calldata creReport) external;
-
-    // ============ Studio Callbacks ============
-
-    /// @notice Called by active studios to report score aggregation progress
-    /// @param totalSubmissions Current number of work submissions in the studio
-    /// @param totalScores Current number of score submissions in the studio
-    function onScoresSubmitted(uint256 totalSubmissions, uint256 totalScores) external;
-
-    /// @notice Called by active studios when settlement consensus is reached
-    /// @param outcome The winning outcome index
-    /// @param proofHash The proof hash from consensus
-    function onStudioSettled(uint8 outcome, bytes32 proofHash) external;
+    function settleWithOutcome(
+        address studio,
+        uint8 outcome,
+        bytes32 proofHash,
+        bytes calldata creReport
+    ) external;
 
     // ============ View Functions ============
 
@@ -92,8 +82,8 @@ interface IChaosOracleRegistry {
     /// @return studios Array of active studio proxy addresses
     function getActiveStudios() external view returns (address[] memory studios);
 
-    /// @notice Check whether a studio has met minimum thresholds to close
+    /// @notice Check whether a studio is active and not yet settled
     /// @param studio The studio proxy address
-    /// @return ready True if the studio can be closed
+    /// @return ready True if the studio exists and hasn't been settled
     function canCloseStudio(address studio) external view returns (bool ready);
 }

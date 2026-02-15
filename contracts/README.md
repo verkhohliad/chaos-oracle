@@ -6,9 +6,9 @@ Foundry project containing the core settlement framework contracts and an exampl
 
 | Contract                    | Sepolia                                                       |
 |-----------------------------|---------------------------------------------------------------|
-| `ChaosOracleRegistry`       | ``  |
-| `PredictionSettlementLogic` | ``      |
-| `ExamplePredictionMarket`   | `` |
+| `ChaosOracleRegistry`       | `0x6f1911A35fac05c0443c2a8E2d83d5d3A055764E`  |
+| `PredictionSettlementLogic` | `0xc0c861dc81067738e03Ebe7a4d55781345aB5fae`      |
+| `ExamplePredictionMarket`   | `0xedE31BaF7E3fe79f8AbA25022494fBd92E01cC87` |
 
 ## Architecture
 
@@ -93,7 +93,7 @@ forge test ForkIntegration.t.sol --fork-url $SEPOLIA_RPC -vvvv
 |------|---------|
 | `MockChaosCore` | Implements `createStudio()` with deterministic proxy deployment |
 | `MockStudioProxyFactory` | Deploys `MockStudioProxy` instances for testing |
-| `MockPredictionMarket` | Records `setSettler()` and `onSettlement()` calls |
+| `MockPredictionMarket` | Records `onSettlement()` calls |
 
 ## Deployment
 
