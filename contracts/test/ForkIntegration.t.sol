@@ -20,7 +20,7 @@ import {MarketKey} from "../src/libraries/MarketKey.sol";
 /// Run with:
 ///   forge test --match-contract ForkIntegrationTest --fork-url $SEPOLIA_RPC -vvv
 contract ForkIntegrationTest is Test {
-    // ── Real ChaosChain addresses on Sepolia ──
+    // -- Real ChaosChain addresses on Sepolia --
     address constant CHAOS_CORE = 0xF6a57f04736A52a38b273b0204d636506a780E67;
     address constant STUDIO_PROXY_FACTORY = 0x230e76a105A9737Ea801BB7d0624D495506EE257;
     address constant CHAOSCHAIN_REGISTRY = 0x7F38C1aFFB24F30500d9174ed565110411E42d50;
@@ -97,7 +97,7 @@ contract ForkIntegrationTest is Test {
         bytes32 key = readyKeys[0];
         assertEq(key, MarketKey.derive(address(market), marketId));
 
-        // Create studio — this goes through the REAL StudioProxyFactory on Sepolia
+        // Create studio -- this goes through the REAL StudioProxyFactory on Sepolia
         bytes memory creReport = abi.encode(bytes32(0));
         registry.createStudioForMarket(key, creReport);
 
@@ -128,9 +128,6 @@ contract ForkIntegrationTest is Test {
         assertEq(abi.decode(data, (string)), "prediction-settlement");
 
         // ========== Phase 4: Settlement (CRE settles with off-chain computed outcome) ==========
-        // In production: CRE reads events, fetches Arweave evidence, computes consensus
-        // Here we simulate the final step: calling settleWithOutcome
-
         bytes32 proofHash = keccak256("fork-test-proof");
         registry.settleWithOutcome(studioProxy, 0, proofHash, creReport);
 
@@ -147,7 +144,6 @@ contract ForkIntegrationTest is Test {
         console.log("Real StudioProxy deployed and settled successfully");
 
         // ========== Phase 5: Claim Winnings ==========
-        // Total pool = 14 (Yes) + 3 (No) = 17 ETH
         uint256 aliceBefore = alice.balance;
         vm.prank(alice);
         market.claimWinnings(marketId);
@@ -210,8 +206,19 @@ contract ForkIntegrationTest is Test {
         assertEq(studioProxy.balance, 1 ether, "Studio should hold 1 ETH reward");
         console.log("Real StudioProxy for agent test:", studioProxy);
 
+        // ========== Register agents via REAL ERC-8004 Identity Registry ==========
+        // Each agent mints a real ERC-8004 identity NFT on Sepolia, then registers on StudioProxy
+        uint256 worker1AgentId = _registerAgentViaERC8004(studioProxy, worker1, 1); // WORKER
+        uint256 worker2AgentId = _registerAgentViaERC8004(studioProxy, worker2, 1); // WORKER
+        uint256 verifier1AgentId = _registerAgentViaERC8004(studioProxy, verifier1, 2); // VERIFIER
+        uint256 verifier2AgentId = _registerAgentViaERC8004(studioProxy, verifier2, 2); // VERIFIER
+
+        console.log("Worker1 agentId (real ERC-8004):", worker1AgentId);
+        console.log("Worker2 agentId (real ERC-8004):", worker2AgentId);
+        console.log("Verifier1 agentId (real ERC-8004):", verifier1AgentId);
+        console.log("Verifier2 agentId (real ERC-8004):", verifier2AgentId);
+
         // ========== Workers Submit Work ==========
-        // Use the real IStudioProxy.submitWork(bytes32, bytes32, bytes32, bytes) signature
         bytes32 dataHash1 = keccak256("fork-worker1-yes-evidence");
         bytes32 threadRoot1 = keccak256("fork-thread1");
         bytes32 evidenceRoot1 = keccak256("QmForkEvidence1");
@@ -220,10 +227,6 @@ contract ForkIntegrationTest is Test {
         bytes32 threadRoot2 = keccak256("fork-thread2");
         bytes32 evidenceRoot2 = keccak256("QmForkEvidence2");
 
-        // NOTE: Real StudioProxy may require agent registration (ERC-8004 identity)
-        //       before accepting submitWork. If this reverts, we try low-level calls
-        //       and check the revert reason.
-
         vm.prank(worker1);
         (bool w1ok,) = studioProxy.call(
             abi.encodeWithSelector(
@@ -231,57 +234,49 @@ contract ForkIntegrationTest is Test {
                 dataHash1, threadRoot1, evidenceRoot1, ""
             )
         );
+        assertTrue(w1ok, "Worker1 submitWork must succeed");
+        console.log("Worker1 submitWork succeeded on real StudioProxy");
 
-        if (w1ok) {
-            console.log("Worker1 submitWork succeeded on real StudioProxy");
+        // Verify work submitter
+        address submitter = IStudioProxy(studioProxy).getWorkSubmitter(dataHash1);
+        assertEq(submitter, worker1, "Worker1 should be recorded as submitter");
 
-            // Verify work submitter
-            address submitter = IStudioProxy(studioProxy).getWorkSubmitter(dataHash1);
-            assertEq(submitter, worker1, "Worker1 should be recorded as submitter");
+        vm.prank(worker2);
+        (bool w2ok,) = studioProxy.call(
+            abi.encodeWithSelector(
+                IStudioProxy.submitWork.selector,
+                dataHash2, threadRoot2, evidenceRoot2, ""
+            )
+        );
+        assertTrue(w2ok, "Worker2 submitWork must succeed");
 
-            // Worker2 submits
-            vm.prank(worker2);
-            (bool w2ok,) = studioProxy.call(
-                abi.encodeWithSelector(
-                    IStudioProxy.submitWork.selector,
-                    dataHash2, threadRoot2, evidenceRoot2, ""
-                )
-            );
-            assertTrue(w2ok, "Worker2 submitWork should succeed");
+        // ========== Verifiers Submit Scores ==========
+        // 5 universal dimensions (real StudioProxy expects exactly 5 + custom)
+        // Use abi.encode(uint8,uint8,uint8,uint8,uint8) for 160 bytes (RD _decodeScoreVector format)
+        bytes memory scoreVector1 = abi.encode(
+            uint8(85), uint8(70), uint8(80), uint8(90), uint8(75)
+        );
 
-            // ========== Verifiers Submit Scores ==========
-            bytes memory scoreVector1 = abi.encode(
-                uint8(85), uint8(70), uint8(80), uint8(90), uint8(75),
-                uint8(95), uint8(88), uint8(72), uint8(80)
-            );
+        vm.prank(verifier1);
+        (bool v1ok,) = studioProxy.call(
+            abi.encodeWithSelector(
+                IStudioProxy.submitScoreVector.selector,
+                dataHash1, scoreVector1
+            )
+        );
+        assertTrue(v1ok, "Verifier1 submitScoreVector must succeed");
+        console.log("Verifier1 submitScoreVector succeeded");
 
-            vm.prank(verifier1);
-            (bool v1ok,) = studioProxy.call(
-                abi.encodeWithSelector(
-                    IStudioProxy.submitScoreVector.selector,
-                    dataHash1, scoreVector1
-                )
-            );
+        vm.prank(verifier2);
+        (bool v2ok,) = studioProxy.call(
+            abi.encodeWithSelector(
+                IStudioProxy.submitScoreVector.selector,
+                dataHash2, scoreVector1
+            )
+        );
+        assertTrue(v2ok, "Verifier2 submitScoreVector must succeed");
 
-            if (v1ok) {
-                console.log("Verifier1 submitScoreVector succeeded");
-
-                vm.prank(verifier2);
-                studioProxy.call(
-                    abi.encodeWithSelector(
-                        IStudioProxy.submitScoreVector.selector,
-                        dataHash2, scoreVector1
-                    )
-                );
-            } else {
-                console.log("submitScoreVector not supported without registration; skipping scores");
-            }
-        } else {
-            console.log("submitWork requires agent registration; testing with vm.store fallback");
-            // Real StudioProxy may need registered agents. We still verify the rest of the flow.
-        }
-
-        // ========== Settle regardless ==========
+        // ========== Settle ==========
         bytes32 proofHash = keccak256("fork-agent-test-proof");
         registry.settleWithOutcome(studioProxy, 0, proofHash, creReport);
 
@@ -292,10 +287,12 @@ contract ForkIntegrationTest is Test {
         console.log("=== Fork Agent Interaction Test Passed ===");
     }
 
-    /// @notice Test RewardsDistributor interaction on a Sepolia fork.
-    ///         Verifies that closeEpoch can be called by the RD owner after settlement.
+    /// @notice Full RewardsDistributor lifecycle on a Sepolia fork.
+    ///         Exercises the REAL closeEpoch flow: register agents via real registerAgent(),
+    ///         submit work/scores on the real StudioProxy, register work/validators on the real RD,
+    ///         call closeEpoch, then verify consensus results, agent balances, and withdrawal.
     function test_rewardsDistributorOnFork() public {
-        // ========== Setup & create studio ==========
+        // ========== Phase 1: Setup & create studio ==========
         uint256 deadline = block.timestamp + 1 days;
 
         vm.prank(alice);
@@ -314,55 +311,411 @@ contract ForkIntegrationTest is Test {
         registry.createStudioForMarket(key, creReport);
 
         address studioProxy = registry.keyToStudio(key);
+        assertTrue(studioProxy != address(0), "Studio proxy should be deployed");
+        assertEq(studioProxy.balance, 1 ether, "Studio should hold 1 ETH reward");
+        console.log("Real StudioProxy for RD test:", studioProxy);
 
-        // ========== Settle ==========
-        registry.settleWithOutcome(studioProxy, 0, keccak256("rd-test-proof"), creReport);
+        // ========== Phase 2: Verify RD contract exists ==========
+        assertTrue(REWARDS_DISTRIBUTOR.code.length > 0, "RewardsDistributor must have code on Sepolia");
+        console.log("RewardsDistributor code size:", REWARDS_DISTRIBUTOR.code.length);
 
-        // ========== Test RewardsDistributor interaction ==========
-        // The RD owner on Sepolia is 0x9B4Cef62a0ce1671ccFEFA6a6D8cBFa165c49831
-        address rdOwner = 0x9B4Cef62a0ce1671ccFEFA6a6D8cBFa165c49831;
-        vm.deal(rdOwner, 10 ether);
+        // ========== Phase 3: Register agents via REAL ERC-8004 Identity Registry ==========
+        address worker1 = makeAddr("forkRDworker1");
+        address verifier1 = makeAddr("forkRDverifier1");
+        address verifier2 = makeAddr("forkRDverifier2");
+        vm.deal(worker1, 10 ether);
+        vm.deal(verifier1, 10 ether);
+        vm.deal(verifier2, 10 ether);
 
-        // Verify RewardsDistributor contract exists and has code
-        uint256 rdCodeSize;
-        address rd = REWARDS_DISTRIBUTOR;
-        assembly {
-            rdCodeSize := extcodesize(rd)
-        }
-        assertTrue(rdCodeSize > 0, "RewardsDistributor should have code on Sepolia");
-        console.log("RewardsDistributor code size:", rdCodeSize);
+        // Each agent mints a real ERC-8004 identity NFT, then registers on StudioProxy
+        uint256 workerAgentId = _registerAgentViaERC8004(studioProxy, worker1, 1); // WORKER
+        uint256 verifier1AgentId = _registerAgentViaERC8004(studioProxy, verifier1, 2); // VERIFIER
+        uint256 verifier2AgentId = _registerAgentViaERC8004(studioProxy, verifier2, 2); // VERIFIER
 
-        // Try calling closeEpoch on the RewardsDistributor.
-        // The exact interface may vary; we test with a low-level call to avoid compilation errors.
-        // closeEpoch(address studio, uint256 epoch)
-        vm.prank(rdOwner);
-        (bool success, bytes memory retData) = REWARDS_DISTRIBUTOR.call(
-            abi.encodeWithSignature("closeEpoch(address,uint256)", studioProxy, 0)
+        console.log("Worker agentId (real ERC-8004):", workerAgentId);
+        console.log("Verifier1 agentId (real ERC-8004):", verifier1AgentId);
+        console.log("Verifier2 agentId (real ERC-8004):", verifier2AgentId);
+        console.log("Agent registration via real ERC-8004 + registerAgent() succeeded");
+
+        // ========== Phase 4: Submit work on real StudioProxy ==========
+        bytes32 dataHash = keccak256("rd-fork-work-1");
+        bytes32 threadRoot = keccak256("rd-fork-thread");
+        bytes32 evidenceRoot = keccak256("rd-fork-evidence");
+
+        vm.prank(worker1);
+        (bool workOk,) = studioProxy.call(
+            abi.encodeWithSelector(IStudioProxy.submitWork.selector, dataHash, threadRoot, evidenceRoot, "")
+        );
+        assertTrue(workOk, "Worker submitWork must succeed");
+        console.log("Worker1 submitWork succeeded");
+
+        // ========== Phase 5: Submit score vectors via submitScoreVectorForWorker ==========
+        // RD.closeEpoch reads per-worker scores via getScoreVectorsForWorker(dataHash, worker)
+        // which reads from _scoreVectorsPerWorker, so verifiers must use submitScoreVectorForWorker()
+        // 5 universal dimensions, abi.encode format for RD _decodeScoreVector (160 bytes)
+        //
+        // IMPORTANT: Both validators must submit identical scores. The RD's validator reward
+        // formula uses integer division: weight = PRECISION / (PRECISION + errorSquared).
+        // Since PRECISION = 1e6, any non-zero error makes the denominator > numerator,
+        // causing weight to floor to 0. Only validators with exactly 0 error get rewards.
+        bytes memory validatorScores = abi.encode(
+            uint8(85), uint8(80), uint8(90), uint8(75), uint8(88)
         );
 
-        if (success) {
-            console.log("closeEpoch succeeded on RewardsDistributor");
-        } else {
-            // May revert because the studio wasn't registered with RD, or epoch doesn't exist.
-            // This is expected — the key thing is that the RD contract is reachable.
-            console.log("closeEpoch reverted (expected: studio not registered with RD)");
-            console.log("Revert data length:", retData.length);
-        }
+        vm.prank(verifier1);
+        (bool sv1ok,) = studioProxy.call(
+            abi.encodeWithSignature(
+                "submitScoreVectorForWorker(bytes32,address,bytes)",
+                dataHash, worker1, validatorScores
+            )
+        );
+        assertTrue(sv1ok, "Verifier1 submitScoreVectorForWorker must succeed");
 
-        // Verify the studio proxy was properly configured with the RD address
-        // Our LogicModule stores _rewardsDistributor at slot 3
-        bytes32 rdSlot = vm.load(studioProxy, bytes32(uint256(3)));
-        console.log("StudioProxy RD slot value:", uint256(rdSlot));
+        vm.prank(verifier2);
+        (bool sv2ok,) = studioProxy.call(
+            abi.encodeWithSignature(
+                "submitScoreVectorForWorker(bytes32,address,bytes)",
+                dataHash, worker1, validatorScores
+            )
+        );
+        assertTrue(sv2ok, "Verifier2 submitScoreVectorForWorker must succeed");
+        console.log("Both verifiers submitted per-worker scores");
 
-        // The factory should have set RewardsDistributor during deployment
-        // (we passed REWARDS_DISTRIBUTOR to deployStudioProxy)
-        if (address(uint160(uint256(rdSlot))) == REWARDS_DISTRIBUTOR) {
-            console.log("StudioProxy correctly references RewardsDistributor");
-        } else {
-            console.log("StudioProxy RD slot does not match expected (factory may set differently)");
-        }
+        // ========== Phase 6: Register work & validators on real RD ==========
+        address rdOwner = _getRDOwner();
+        assertTrue(rdOwner != address(0), "RD owner must be non-zero");
+        vm.deal(rdOwner, 10 ether);
+
+        // registerWork(studio, epoch, dataHash) - onlyOwner
+        vm.prank(rdOwner);
+        (bool rwOk,) = REWARDS_DISTRIBUTOR.call(
+            abi.encodeWithSignature("registerWork(address,uint64,bytes32)", studioProxy, uint64(0), dataHash)
+        );
+        assertTrue(rwOk, "registerWork on real RD must succeed");
+
+        // registerValidator(dataHash, validator) - onlyOwner
+        vm.startPrank(rdOwner);
+        (bool rv1ok,) = REWARDS_DISTRIBUTOR.call(
+            abi.encodeWithSignature("registerValidator(bytes32,address)", dataHash, verifier1)
+        );
+        assertTrue(rv1ok, "registerValidator(verifier1) on real RD must succeed");
+
+        (bool rv2ok,) = REWARDS_DISTRIBUTOR.call(
+            abi.encodeWithSignature("registerValidator(bytes32,address)", dataHash, verifier2)
+        );
+        assertTrue(rv2ok, "registerValidator(verifier2) on real RD must succeed");
+        vm.stopPrank();
+        console.log("Work and validators registered on real RD");
+
+        // ========== Phase 7: Call closeEpoch on the REAL RewardsDistributor ==========
+        vm.prank(rdOwner);
+        (bool epochOk,) = REWARDS_DISTRIBUTOR.call(
+            abi.encodeWithSignature("closeEpoch(address,uint64)", studioProxy, uint64(0))
+        );
+        assertTrue(epochOk, "closeEpoch on real RD must succeed");
+        console.log("closeEpoch SUCCEEDED on real RewardsDistributor!");
+
+        // ========== Phase 8: Verify consensus results ==========
+        // RD stores per-worker consensus at keccak256(abi.encodePacked(dataHash, worker))
+        bytes32 workerDataHash = keccak256(abi.encodePacked(dataHash, worker1));
+        (bool crOk, bytes memory crData) = REWARDS_DISTRIBUTOR.staticcall(
+            abi.encodeWithSignature("getConsensusResult(bytes32)", workerDataHash)
+        );
+        assertTrue(crOk, "getConsensusResult must succeed");
+        assertTrue(crData.length > 64, "Consensus result must have meaningful data");
+        console.log("Consensus result retrieved from real RD");
+
+        // ========== Phase 9: Verify agent withdrawable balances ==========
+        (bool wbOk, bytes memory wbData) = studioProxy.staticcall(
+            abi.encodeWithSignature("getWithdrawableBalance(address)", worker1)
+        );
+        assertTrue(wbOk, "getWithdrawableBalance must succeed for worker");
+        uint256 workerWithdrawable = abi.decode(wbData, (uint256));
+        assertTrue(workerWithdrawable > 0, "Worker must have withdrawable balance after closeEpoch");
+        console.log("Worker withdrawable balance:", workerWithdrawable);
+
+        // Verify budget split: worker pool = 85% of getTotalEscrow()
+        // getTotalEscrow() includes 1 ETH reward + agent stakes (0.3 ETH) = 1.3 ETH
+        // Actual worker reward = workerPool * contributionWeight * qualityScalar / (10000 * 100)
+        // With identical high scores, qualityScalar should be close to the universal avg
+        uint256 fullEscrow = 1 ether + 0.3 ether; // reward + 3 agent stakes
+        assertTrue(
+            workerWithdrawable <= (fullEscrow * 8500) / 10000,
+            "Worker reward must not exceed 85% of total escrow"
+        );
+
+        (bool vbOk, bytes memory vbData) = studioProxy.staticcall(
+            abi.encodeWithSignature("getWithdrawableBalance(address)", verifier1)
+        );
+        assertTrue(vbOk, "getWithdrawableBalance must succeed for verifier1");
+        uint256 verifier1Withdrawable = abi.decode(vbData, (uint256));
+        assertTrue(verifier1Withdrawable > 0, "Verifier1 must have withdrawable balance after closeEpoch");
+        console.log("Verifier1 withdrawable balance:", verifier1Withdrawable);
+
+        // Both verifiers submitted identical scores -> both have 0 error -> equal rewards
+        (, bytes memory v2bData) = studioProxy.staticcall(
+            abi.encodeWithSignature("getWithdrawableBalance(address)", verifier2)
+        );
+        uint256 verifier2Withdrawable = abi.decode(v2bData, (uint256));
+        assertTrue(verifier2Withdrawable > 0, "Verifier2 must have withdrawable balance after closeEpoch");
+        assertEq(verifier1Withdrawable, verifier2Withdrawable, "Both verifiers must get equal rewards (identical scores)");
+        console.log("Verifier2 withdrawable balance:", verifier2Withdrawable);
+
+        // ========== Phase 10: Verify withdrawal ==========
+        uint256 workerBalBefore = worker1.balance;
+        vm.prank(worker1);
+        (bool withdrawOk,) = studioProxy.call(
+            abi.encodeWithSignature("withdraw()")
+        );
+        assertTrue(withdrawOk, "Worker withdraw must succeed");
+
+        uint256 workerGain = worker1.balance - workerBalBefore;
+        assertTrue(workerGain > 0, "Worker must receive ETH from withdrawal");
+        assertEq(workerGain, workerWithdrawable, "Worker must receive exact withdrawable amount");
+        console.log("Worker withdrew:", workerGain);
+
+        // Verify balance is 0 after withdrawal
+        (, bytes memory postData) = studioProxy.staticcall(
+            abi.encodeWithSignature("getWithdrawableBalance(address)", worker1)
+        );
+        assertEq(abi.decode(postData, (uint256)), 0, "Worker withdrawable must be 0 after withdrawal");
+
+        // Verifier1 withdraws
+        uint256 verifier1BalBefore = verifier1.balance;
+        vm.prank(verifier1);
+        (bool v1WithdrawOk,) = studioProxy.call(
+            abi.encodeWithSignature("withdraw()")
+        );
+        assertTrue(v1WithdrawOk, "Verifier1 withdraw must succeed");
+
+        uint256 verifier1Gain = verifier1.balance - verifier1BalBefore;
+        assertTrue(verifier1Gain > 0, "Verifier1 must receive ETH from withdrawal");
+        assertEq(verifier1Gain, verifier1Withdrawable, "Verifier1 must receive exact withdrawable amount");
+        console.log("Verifier1 withdrew:", verifier1Gain);
+
+        // Verifier2 withdraws
+        uint256 verifier2BalBefore = verifier2.balance;
+        vm.prank(verifier2);
+        (bool v2WithdrawOk,) = studioProxy.call(
+            abi.encodeWithSignature("withdraw()")
+        );
+        assertTrue(v2WithdrawOk, "Verifier2 withdraw must succeed");
+        assertEq(verifier2.balance - verifier2BalBefore, verifier2Withdrawable, "Verifier2 must receive exact withdrawable amount");
+        console.log("Verifier2 withdrew:", verifier2.balance - verifier2BalBefore);
+
+        // ========== Settle the market ==========
+        registry.settleWithOutcome(studioProxy, 0, keccak256("rd-test-proof"), creReport);
+
+        (, , , , , uint8 outcome, bool settled) = market.getMarket(marketId);
+        assertEq(outcome, 0, "Yes should win");
+        assertTrue(settled, "Market should be settled");
 
         console.log("=== RewardsDistributor Fork Test Passed ===");
+    }
+
+    /// @notice Focused test on the agent withdrawal flow after closeEpoch.
+    ///         Verifies each agent can withdraw independently after the RD processes rewards.
+    function test_agentWithdrawOnFork() public {
+        // ========== Setup: create studio ==========
+        uint256 deadline = block.timestamp + 1 days;
+
+        vm.prank(alice);
+        uint256 marketId = market.createMarket{value: 20 ether}(
+            "Withdraw test: Will DOGE hit $1?",
+            deadline
+        );
+
+        vm.warp(deadline + 1);
+
+        bytes32 key = MarketKey.derive(address(market), marketId);
+        bytes memory creReport = abi.encode(bytes32(0));
+        registry.createStudioForMarket(key, creReport);
+
+        address studioProxy = registry.keyToStudio(key);
+        assertTrue(studioProxy != address(0), "Studio proxy must be deployed");
+        assertEq(studioProxy.balance, 2 ether, "Studio should hold 2 ETH reward");
+
+        // ========== Register agents via REAL ERC-8004 Identity Registry ==========
+        address worker = makeAddr("withdrawWorker");
+        address verifier = makeAddr("withdrawVerifier");
+        vm.deal(worker, 10 ether);
+        vm.deal(verifier, 10 ether);
+
+        // Each agent mints a real ERC-8004 identity NFT, then registers on StudioProxy
+        uint256 workerId = _registerAgentViaERC8004(studioProxy, worker, 1); // WORKER
+        uint256 verifierId = _registerAgentViaERC8004(studioProxy, verifier, 2); // VERIFIER
+        console.log("Worker agentId (real ERC-8004):", workerId);
+        console.log("Verifier agentId (real ERC-8004):", verifierId);
+
+        // ========== Submit work ==========
+        bytes32 dataHash = keccak256("withdraw-fork-work");
+        bytes32 threadRoot = keccak256("withdraw-thread");
+        bytes32 evidenceRoot = keccak256("withdraw-evidence");
+
+        vm.prank(worker);
+        (bool workOk,) = studioProxy.call(
+            abi.encodeWithSelector(IStudioProxy.submitWork.selector, dataHash, threadRoot, evidenceRoot, "")
+        );
+        assertTrue(workOk, "Worker submitWork must succeed");
+
+        // Submit per-worker scores (RD reads from _scoreVectorsPerWorker)
+        bytes memory scores = abi.encode(
+            uint8(90), uint8(85), uint8(88), uint8(80), uint8(92)
+        );
+        vm.prank(verifier);
+        (bool scoreOk,) = studioProxy.call(
+            abi.encodeWithSignature(
+                "submitScoreVectorForWorker(bytes32,address,bytes)",
+                dataHash, worker, scores
+            )
+        );
+        assertTrue(scoreOk, "Verifier submitScoreVectorForWorker must succeed");
+
+        // ========== Register on RD and close epoch ==========
+        address rdOwner = _getRDOwner();
+        assertTrue(rdOwner != address(0), "RD owner must be non-zero");
+        vm.deal(rdOwner, 10 ether);
+
+        vm.startPrank(rdOwner);
+        (bool rwOk,) = REWARDS_DISTRIBUTOR.call(
+            abi.encodeWithSignature("registerWork(address,uint64,bytes32)", studioProxy, uint64(0), dataHash)
+        );
+        assertTrue(rwOk, "registerWork on real RD must succeed");
+
+        (bool rvOk,) = REWARDS_DISTRIBUTOR.call(
+            abi.encodeWithSignature("registerValidator(bytes32,address)", dataHash, verifier)
+        );
+        assertTrue(rvOk, "registerValidator on real RD must succeed");
+        vm.stopPrank();
+
+        // ========== Close epoch via REAL RD ==========
+        vm.prank(rdOwner);
+        (bool epochOk,) = REWARDS_DISTRIBUTOR.call(
+            abi.encodeWithSignature("closeEpoch(address,uint64)", studioProxy, uint64(0))
+        );
+        assertTrue(epochOk, "closeEpoch on real RD must succeed");
+        console.log("closeEpoch succeeded!");
+
+        // ========== Verify both agents can withdraw independently ==========
+
+        // Worker withdrawal
+        (bool wbOk, bytes memory wbData) = studioProxy.staticcall(
+            abi.encodeWithSignature("getWithdrawableBalance(address)", worker)
+        );
+        assertTrue(wbOk, "getWithdrawableBalance must succeed for worker");
+        uint256 workerWithdrawable = abi.decode(wbData, (uint256));
+        assertTrue(workerWithdrawable > 0, "Worker must have rewards after closeEpoch");
+        console.log("Worker withdrawable:", workerWithdrawable);
+
+        uint256 workerBalBefore = worker.balance;
+        vm.prank(worker);
+        (bool wOk,) = studioProxy.call(abi.encodeWithSignature("withdraw()"));
+        assertTrue(wOk, "Worker withdraw must succeed");
+        assertEq(worker.balance - workerBalBefore, workerWithdrawable, "Worker must receive exact withdrawable amount");
+
+        // Verify worker balance is 0 after withdrawal
+        (, bytes memory postWorker) = studioProxy.staticcall(
+            abi.encodeWithSignature("getWithdrawableBalance(address)", worker)
+        );
+        assertEq(abi.decode(postWorker, (uint256)), 0, "Worker withdrawable must be 0 after withdrawal");
+
+        // Verifier withdrawal
+        (bool vbOk, bytes memory vbData) = studioProxy.staticcall(
+            abi.encodeWithSignature("getWithdrawableBalance(address)", verifier)
+        );
+        assertTrue(vbOk, "getWithdrawableBalance must succeed for verifier");
+        uint256 verifierWithdrawable = abi.decode(vbData, (uint256));
+        assertTrue(verifierWithdrawable > 0, "Verifier must have rewards after closeEpoch");
+        console.log("Verifier withdrawable:", verifierWithdrawable);
+
+        uint256 verifierBalBefore = verifier.balance;
+        vm.prank(verifier);
+        (bool vOk,) = studioProxy.call(abi.encodeWithSignature("withdraw()"));
+        assertTrue(vOk, "Verifier withdraw must succeed");
+        assertEq(verifier.balance - verifierBalBefore, verifierWithdrawable, "Verifier must receive exact withdrawable amount");
+
+        // Verify total distributed does not exceed escrow
+        uint256 totalDistributed = workerWithdrawable + verifierWithdrawable;
+        assertTrue(totalDistributed <= 2 ether, "Total distributed must not exceed studio escrow");
+        console.log("Total distributed:", totalDistributed, "/ 2 ETH escrow");
+
+        // Verify double-withdraw reverts (no funds remaining)
+        vm.prank(worker);
+        (bool doubleOk,) = studioProxy.call(abi.encodeWithSignature("withdraw()"));
+        assertTrue(!doubleOk, "Double withdraw must revert");
+
+        // ========== Settle ==========
+        registry.settleWithOutcome(studioProxy, 0, keccak256("withdraw-proof"), creReport);
+
+        (, , , , , uint8 outcome, bool settled) = market.getMarket(marketId);
+        assertEq(outcome, 0, "Yes should win");
+        assertTrue(settled, "Market should be settled");
+
+        console.log("=== Agent Withdraw Fork Test Passed ===");
+    }
+
+    // ============ Internal Helpers ============
+
+    /// @dev Get the real ERC-8004 Identity Registry address from the on-chain ChaosChainRegistry.
+    function _getIdentityRegistry() internal view returns (address) {
+        (bool ok, bytes memory data) = CHAOSCHAIN_REGISTRY.staticcall(
+            abi.encodeWithSignature("getIdentityRegistry()")
+        );
+        require(ok && data.length >= 32, "Failed to get identity registry from ChaosChainRegistry");
+        address identityRegistry = abi.decode(data, (address));
+        require(identityRegistry != address(0), "Identity registry address is zero");
+        return identityRegistry;
+    }
+
+    /// @dev Register an agent on the real ERC-8004 Identity Registry and then on the StudioProxy.
+    ///      1. Calls identityRegistry.register() to mint an ERC-8004 identity NFT for the agent
+    ///      2. Calls studioProxy.registerAgent(agentId, role) with the minted agentId + ETH stake
+    ///      Returns the agentId from the real identity registry.
+    function _registerAgentViaERC8004(
+        address studioProxyAddr,
+        address agent,
+        uint8 role // 1 = WORKER, 2 = VERIFIER
+    ) internal returns (uint256 agentId) {
+        address identityRegistry = _getIdentityRegistry();
+
+        // Step 1: Mint ERC-8004 identity NFT on real identity registry
+        vm.prank(agent);
+        (bool regOk, bytes memory regData) = identityRegistry.call(
+            abi.encodeWithSignature("register()")
+        );
+        assertTrue(regOk, "ERC-8004 register() must succeed");
+        agentId = abi.decode(regData, (uint256));
+        assertTrue(agentId > 0, "ERC-8004 agentId must be > 0");
+
+        // Verify ownership on real identity registry
+        (bool ownerOk, bytes memory ownerData) = identityRegistry.staticcall(
+            abi.encodeWithSignature("ownerOf(uint256)", agentId)
+        );
+        assertTrue(ownerOk, "ownerOf must succeed");
+        assertEq(abi.decode(ownerData, (address)), agent, "Agent must own their ERC-8004 identity NFT");
+
+        // Step 2: Register agent on real StudioProxy with ETH stake
+        vm.prank(agent);
+        (bool studioRegOk,) = studioProxyAddr.call{value: 0.1 ether}(
+            abi.encodeWithSignature("registerAgent(uint256,uint8)", agentId, role)
+        );
+        assertTrue(studioRegOk, "StudioProxy registerAgent must succeed");
+
+        // Verify agent ID stored correctly on StudioProxy
+        (bool getOk, bytes memory getData) = studioProxyAddr.staticcall(
+            abi.encodeWithSignature("getAgentId(address)", agent)
+        );
+        assertTrue(getOk, "getAgentId must succeed");
+        assertEq(abi.decode(getData, (uint256)), agentId, "StudioProxy must store correct agentId");
+    }
+
+    /// @dev Get the RD owner address on Sepolia
+    function _getRDOwner() internal view returns (address) {
+        (bool ok, bytes memory data) = REWARDS_DISTRIBUTOR.staticcall(
+            abi.encodeWithSignature("owner()")
+        );
+        require(ok && data.length >= 32, "Failed to get RD owner");
+        return abi.decode(data, (address));
     }
 
     receive() external payable {}

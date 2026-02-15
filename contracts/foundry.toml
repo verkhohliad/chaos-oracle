@@ -14,7 +14,8 @@ via_ir = true
 # Remappings
 remappings = [
     "@openzeppelin/=lib/openzeppelin-contracts/contracts/",
-    "@chaoschain/=src/vendor/chaoschain/"
+    "@chaoschain/=src/vendor/chaoschain/",
+    "@chaoschain-ext/=../external/chaoschain/packages/contracts/src/"
 ]
 
 # Gas reporting

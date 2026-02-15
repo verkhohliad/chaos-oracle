@@ -69,30 +69,44 @@ forge test -vvv
 
 ## Tests
 
-68 tests across 5 test suites:
+90 tests across 7 test suites (86 unit + 4 fork):
 
 | Suite | Tests | Coverage |
 |-------|-------|----------|
-| `ChaosOracleRegistry.t.sol` | 23 | Constructor, admin, registration, CRE access control, studio creation, views |
-| `PredictionSettlementLogic.t.sol` | 24 | Initialize, worker/verifier registration, submissions, scoring, consensus |
-| `ExamplePredictionMarket.t.sol` | 18 | Market creation, betting, settlement, claims, payout math |
-| `Integration.t.sol` | 2 | Full lifecycle, multiple markets |
-| `ForkIntegration.t.sol` | 1 | Full lifecycle on forked Sepolia with real ChaosChain contracts |
+| `ChaosOracleRegistry.t.sol` | 24 | Constructor, admin, registration, CRE access control, studio creation, escrow, views |
+| `ExamplePredictionMarket.t.sol` | 15 | Market creation, betting, settlement, claims, payout math |
+| `PredictionSettlementLogic.t.sol` | 6 | Initialize, studio interface, scoring criteria |
+| `Integration.t.sol` | 5 | Full lifecycle, multi-market, agent interactions (mock infra) |
+| `RewardsAndWithdrawal.t.sol` | 21 | Consensus, budget split (85/10/5), worker/validator rewards, withdrawal flow |
+| `ScoringLibrary.t.sol` | 7 | MAD-based consensus: median, outlier filtering, stake weighting |
+| `ForkIntegration.t.sol` | 4 | Full lifecycle, ERC-8004 agent registration, RewardsDistributor closeEpoch, withdrawals (real Sepolia) |
 
 ```bash
-forge test --skip ForkIntegration.t.sol
-# Ran 4 test suites: 67 tests passed, 0 failed, 0 skipped
+# Unit tests (no fork required)
+forge test --skip ForkIntegration
+# Ran 6 test suites: 86 tests passed, 0 failed, 0 skipped
 
-forge test ForkIntegration.t.sol --fork-url $SEPOLIA_RPC -vvvv
-# Suite result: ok. 1 passed; 0 failed; 0 skipped;
+# Fork tests (requires Sepolia RPC)
+forge test --match-contract ForkIntegration --fork-url $SEPOLIA_RPC -vvv
+# Suite result: ok. 4 passed; 0 failed; 0 skipped
 ```
+
+### Fork Tests
+
+Fork tests run against a Sepolia fork exercising **real ChaosChain infrastructure**:
+
+- **ERC-8004 Identity Registry** — agents mint real identity NFTs via `register()`, verified via `ownerOf()`
+- **StudioProxyFactory** — deploys real `StudioProxy` instances (permissionless)
+- **StudioProxy** — real agent registration (`registerAgent`), work submission, score vectors
+- **RewardsDistributor** — real `closeEpoch` flow: consensus computation, reward distribution, pull-payment withdrawals
 
 ### Test Mocks
 
 | Mock | Purpose |
 |------|---------|
 | `MockChaosCore` | Implements `createStudio()` with deterministic proxy deployment |
-| `MockStudioProxyFactory` | Deploys `MockStudioProxy` instances for testing |
+| `MockStudioProxyFactory` | Deploys `MockStudioProxy` instances with multi-agent support |
+| `MockRewardsDistributor` | Simplified `closeEpoch` with budget split and `releaseFunds` calls |
 | `MockPredictionMarket` | Records `onSettlement()` calls |
 
 ## Deployment
@@ -203,8 +217,12 @@ contracts/
 │   ├── PredictionSettlementLogic.t.sol
 │   ├── ExamplePredictionMarket.t.sol
 │   ├── Integration.t.sol
+│   ├── RewardsAndWithdrawal.t.sol  # Consensus, rewards, withdrawal flow
+│   ├── ScoringLibrary.t.sol        # MAD-based consensus algorithm
+│   ├── ForkIntegration.t.sol       # Real Sepolia infrastructure tests
 │   └── mocks/
 │       ├── MockChaosCore.sol
+│       ├── MockRewardsDistributor.sol
 │       └── MockPredictionMarket.sol
 ├── script/
 │   ├── DeployAll.s.sol

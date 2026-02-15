@@ -132,6 +132,18 @@ contract MockStudioProxy {
     /// @dev Withdrawable balances (populated after releaseFunds)
     mapping(address => uint256) public withdrawable;
 
+    /// @dev Work participants per dataHash (multi-agent support)
+    mapping(bytes32 => address[]) internal _workParticipants;
+
+    /// @dev Contribution weights: dataHash => participant => basis points (0-10000)
+    mapping(bytes32 => mapping(address => uint16)) internal _contributionWeights;
+
+    /// @dev Validators who scored a given dataHash
+    mapping(bytes32 => address[]) internal _validators;
+
+    /// @dev Per-worker score vectors: dataHash => worker => validator => scoreVector
+    mapping(bytes32 => mapping(address => mapping(address => bytes))) internal _scoreVectorsPerWorker;
+
     // ============ Constructor ============
 
     constructor(address _logicModule) {
@@ -178,7 +190,35 @@ contract MockStudioProxy {
         workSubmitterAgentId[dataHash] = agentId;
         workSubmitters[dataHash] = msg.sender;
 
+        // Default: single worker gets 100% contribution weight
+        _workParticipants[dataHash].push(msg.sender);
+        _contributionWeights[dataHash][msg.sender] = 10000;
+
         emit WorkSubmitted(agentId, dataHash, threadRoot, evidenceRoot, block.timestamp);
+    }
+
+    /// @notice Submit work with multiple agents (test helper for multi-agent scenarios).
+    /// @param dataHash The work identifier
+    /// @param participants Array of participant addresses
+    /// @param weights Contribution weights in basis points (must sum to 10000)
+    function submitWorkMultiAgent(
+        bytes32 dataHash,
+        address[] calldata participants,
+        uint16[] calldata weights
+    ) external {
+        require(workSubmitters[dataHash] == address(0), "Work already submitted");
+        require(participants.length == weights.length, "Length mismatch");
+
+        // Use first participant as primary submitter
+        workSubmitters[dataHash] = participants[0];
+        workSubmitterAgentId[dataHash] = agentIds[participants[0]];
+
+        for (uint256 i = 0; i < participants.length; i++) {
+            _workParticipants[dataHash].push(participants[i]);
+            _contributionWeights[dataHash][participants[i]] = weights[i];
+        }
+
+        emit WorkSubmitted(agentIds[participants[0]], dataHash, bytes32(0), bytes32(0), block.timestamp);
     }
 
     // ============ IStudioProxy: Score Submission ============
@@ -191,7 +231,40 @@ contract MockStudioProxy {
         uint256 validatorAgentId = agentIds[msg.sender];
         scoreVectors[dataHash][msg.sender] = scoreVector;
 
+        // Track validator (deduped)
+        bool found = false;
+        for (uint256 i = 0; i < _validators[dataHash].length; i++) {
+            if (_validators[dataHash][i] == msg.sender) { found = true; break; }
+        }
+        if (!found) _validators[dataHash].push(msg.sender);
+
+        // Default: store as score for primary worker
+        address primaryWorker = workSubmitters[dataHash];
+        _scoreVectorsPerWorker[dataHash][primaryWorker][msg.sender] = scoreVector;
+
         emit ScoreVectorSubmitted(validatorAgentId, dataHash, scoreVector, block.timestamp);
+    }
+
+    /// @notice Submit a score vector for a specific worker (multi-agent test helper).
+    function submitScoreVectorForWorker(
+        bytes32 dataHash,
+        address worker,
+        bytes calldata scoreVector
+    ) external {
+        require(workSubmitters[dataHash] != address(0), "Work not found");
+
+        scoreVectors[dataHash][msg.sender] = scoreVector;
+
+        // Track validator (deduped)
+        bool found = false;
+        for (uint256 i = 0; i < _validators[dataHash].length; i++) {
+            if (_validators[dataHash][i] == msg.sender) { found = true; break; }
+        }
+        if (!found) _validators[dataHash].push(msg.sender);
+
+        _scoreVectorsPerWorker[dataHash][worker][msg.sender] = scoreVector;
+
+        emit ScoreVectorSubmitted(agentIds[msg.sender], dataHash, scoreVector, block.timestamp);
     }
 
     // ============ IStudioProxy: Escrow & Funds ============
@@ -216,6 +289,73 @@ contract MockStudioProxy {
         withdrawable[msg.sender] = 0;
         (bool ok, ) = msg.sender.call{value: amount}("");
         require(ok, "Transfer failed");
+    }
+
+    // ============ View Functions (matching real StudioProxy) ============
+
+    /// @notice Get total escrow deposited in this studio
+    function getTotalEscrow() external view returns (uint256) {
+        return depositedAmount;
+    }
+
+    /// @notice Get agent ID for an address
+    function getAgentId(address agent) external view returns (uint256) {
+        return agentIds[agent];
+    }
+
+    /// @notice Get work participants for a dataHash
+    function getWorkParticipants(bytes32 dataHash) external view returns (address[] memory) {
+        return _workParticipants[dataHash];
+    }
+
+    /// @notice Get contribution weight for a participant on a given work
+    function getContributionWeight(bytes32 dataHash, address participant) external view returns (uint16) {
+        return _contributionWeights[dataHash][participant];
+    }
+
+    /// @notice Get all contribution weights for a given work
+    function getContributionWeights(bytes32 dataHash) external view returns (uint16[] memory weights) {
+        address[] memory participants = _workParticipants[dataHash];
+        weights = new uint16[](participants.length);
+        for (uint256 i = 0; i < participants.length; i++) {
+            weights[i] = _contributionWeights[dataHash][participants[i]];
+        }
+    }
+
+    /// @notice Get score vectors from all validators for a specific worker
+    function getScoreVectorsForWorker(
+        bytes32 dataHash,
+        address worker
+    ) external view returns (address[] memory validators, bytes[] memory vectors) {
+        address[] memory allValidators = _validators[dataHash];
+        // Count validators who scored this worker
+        uint256 count = 0;
+        for (uint256 i = 0; i < allValidators.length; i++) {
+            if (_scoreVectorsPerWorker[dataHash][worker][allValidators[i]].length > 0) {
+                count++;
+            }
+        }
+        validators = new address[](count);
+        vectors = new bytes[](count);
+        uint256 idx = 0;
+        for (uint256 i = 0; i < allValidators.length; i++) {
+            bytes memory sv = _scoreVectorsPerWorker[dataHash][worker][allValidators[i]];
+            if (sv.length > 0) {
+                validators[idx] = allValidators[i];
+                vectors[idx] = sv;
+                idx++;
+            }
+        }
+    }
+
+    /// @notice Get withdrawable balance for an account
+    function getWithdrawableBalance(address account) external view returns (uint256) {
+        return withdrawable[account];
+    }
+
+    /// @notice Get all validators who scored a given dataHash
+    function getValidators(bytes32 dataHash) external view returns (address[] memory) {
+        return _validators[dataHash];
     }
 
     // ============ Delegatecall fallback (for LogicModule functions) ============
