@@ -162,24 +162,6 @@
   },
   {
     "type": "function",
-    "name": "closeStudioEpoch",
-    "inputs": [
-      {
-        "name": "studio",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "creReport",
-        "type": "bytes",
-        "internalType": "bytes"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "creForwarder",
     "inputs": [],
     "outputs": [
@@ -311,42 +293,6 @@
       }
     ],
     "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "onScoresSubmitted",
-    "inputs": [
-      {
-        "name": "totalSubmissions",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "totalScores",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "onStudioSettled",
-    "inputs": [
-      {
-        "name": "outcome",
-        "type": "uint8",
-        "internalType": "uint8"
-      },
-      {
-        "name": "proofHash",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -487,6 +433,34 @@
   },
   {
     "type": "function",
+    "name": "settleWithOutcome",
+    "inputs": [
+      {
+        "name": "studio",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "outcome",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "proofHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "creReport",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "studioProxyFactory",
     "inputs": [],
     "outputs": [
@@ -618,31 +592,6 @@
   },
   {
     "type": "event",
-    "name": "StudioScoresSubmitted",
-    "inputs": [
-      {
-        "name": "studio",
-        "type": "address",
-        "indexed": true,
-        "internalType": "address"
-      },
-      {
-        "name": "totalSubmissions",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "totalScores",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
     "name": "StudioSettled",
     "inputs": [
       {
@@ -674,6 +623,56 @@
   },
   {
     "type": "error",
+    "name": "AlreadyHasStudio",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AlreadyRegistered",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "DeadlineInPast",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "DeadlineNotReached",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "EmptyQuestion",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InitializeFailed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "MarketNotFound",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoReward",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotActiveStudio",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotCREForwarder",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "OwnableInvalidOwner",
     "inputs": [
       {
@@ -693,5 +692,35 @@
         "internalType": "address"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "SettlementFailed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "StudioAlreadyExists",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "StudioAlreadySettled",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TooFewOptions",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "UnauthorizedWorkflow",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ZeroAddress",
+    "inputs": []
   }
 ]
