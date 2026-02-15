@@ -86,27 +86,18 @@ async def run(config: VerifierConfig) -> NoReturn:
     """
 
     # -- Components ---------------------------------------------------------
-    if config.chaoschain_mode == "local":
-        logger.info("verifier.mode.local", msg="Using DirectSubmitter (no Gateway)")
-        sdk_client = create_sdk_client(
-            mode="local",
-            private_key=config.verifier_private_key,
-            rpc_url=config.sepolia_rpc_url,
-        )
-    else:
-        from chaoschain_sdk import AgentRole
+    from chaoschain_sdk import AgentRole
 
-        logger.info("verifier.mode.gateway", msg="Using ChaosChain Gateway")
-        network = _resolve_network(config.chaoschain_network)
-        sdk_client = create_sdk_client(
-            mode="gateway",
-            private_key=config.verifier_private_key,
-            network=network,
-            gateway_url=config.chaoschain_gateway_url,
-            agent_name="ChaosOracle-Verifier",
-            agent_domain="verifier.chaosoracle.example.com",
-            agent_role=AgentRole.VERIFIER,
-        )
+    logger.info("verifier.mode.gateway", msg="Using ChaosChain Gateway")
+    network = _resolve_network(config.chaoschain_network)
+    sdk_client = create_sdk_client(
+        private_key=config.verifier_private_key,
+        network=network,
+        gateway_url=config.chaoschain_gateway_url,
+        agent_name="ChaosOracle-Verifier",
+        agent_domain="verifier.chaosoracle.example.com",
+        agent_role=AgentRole.VERIFIER,
+    )
 
     registry = RegistryReader(
         rpc_url=config.sepolia_rpc_url,
@@ -131,6 +122,9 @@ async def run(config: VerifierConfig) -> NoReturn:
     # Studios where we have already registered as a verifier.
     registered_studios: set[str] = set()
 
+    # Studios where we have already withdrawn stakes/rewards.
+    withdrawn_studios: set[str] = set()
+
     # -- Poll loop -----------------------------------------------------------
     logger.info("verifier.loop.start", poll_interval=config.poll_interval_seconds)
 
@@ -143,6 +137,17 @@ async def run(config: VerifierConfig) -> NoReturn:
                     # Fetch studio details to check if epoch is still open
                     details = registry.get_studio_details(studio_address)
                     if details.epoch_closed:
+                        # Attempt to withdraw stakes/rewards from settled studio
+                        if studio_address not in withdrawn_studios:
+                            try:
+                                ok = await sdk_client.withdraw_from_studio(studio_address)
+                                if ok:
+                                    withdrawn_studios.add(studio_address)
+                                    logger.info("verifier.withdraw.done", studio=studio_address)
+                                else:
+                                    logger.warning("verifier.withdraw.reverted", studio=studio_address)
+                            except Exception:
+                                logger.exception("verifier.withdraw.error", studio=studio_address)
                         continue
 
                     # Only look at studios that have at least one worker submission

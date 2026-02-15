@@ -87,3 +87,27 @@ VERIFIER_STAKE_WEI: int = 1_000_000_000_000_000  # 0.001 ETH
 
 CHAOS_ORACLE_REGISTRY_ABI: list[dict] = _load_abi("ChaosOracleRegistry")
 PREDICTION_SETTLEMENT_LOGIC_ABI: list[dict] = _load_abi("PredictionSettlementLogic")
+
+# ---------------------------------------------------------------------------
+# StudioProxy withdraw ABI (inline — only 2 functions, won't change)
+# ---------------------------------------------------------------------------
+# The StudioProxy contract has a withdraw() function that transfers
+# _withdrawable[msg.sender] to the caller.  This is used by agents to
+# reclaim stakes and rewards after a studio epoch closes.
+
+STUDIO_PROXY_WITHDRAW_ABI: list[dict] = [
+    {
+        "inputs": [],
+        "name": "withdraw",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [{"name": "account", "type": "address"}],
+        "name": "getEscrowBalance",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]

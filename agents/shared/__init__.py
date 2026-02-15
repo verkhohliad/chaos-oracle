@@ -17,13 +17,7 @@ from shared.constants import (
 )
 from shared.registry_reader import RegistryReader, StudioDetails, WorkerSubmission
 
-# ChaosOracleSDKClient depends on chaoschain_sdk which is only installed in
-# gateway mode.  Import lazily so local-mode containers (which only need
-# DirectSubmitter) don't crash on startup.
-try:
-    from shared.sdk_client import ChaosOracleSDKClient
-except ImportError:
-    ChaosOracleSDKClient = None  # type: ignore[assignment,misc]
+from shared.sdk_client import ChaosOracleSDKClient
 
 __all__ = [
     "ArweaveClient",

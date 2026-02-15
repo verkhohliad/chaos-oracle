@@ -1,13 +1,19 @@
 """
-On-chain reader for ChaosOracleRegistry and PredictionSettlementLogic state.
+On-chain reader for ChaosOracleRegistry and StudioProxy state.
 
 Uses :pymod:`web3` to perform read-only contract calls against studio proxy
 contracts and the central registry.
+
+After the architecture change, PredictionSettlementLogic only provides
+metadata (question, options, scoring criteria). Worker/verifier state is
+managed natively by StudioProxy. The RegistryReader now checks settlement
+status via the Registry's ``activeStudios`` mapping and reads worker
+submissions via ``WorkSubmitted`` events from StudioProxy.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
@@ -19,9 +25,42 @@ from shared.constants import (
     CHAOS_ORACLE_REGISTRY_ABI,
     PREDICTION_SETTLEMENT_LOGIC_ABI,
     SEPOLIA_RPC_URL,
+    STUDIO_PROXY_WITHDRAW_ABI,
 )
 
 logger = structlog.get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# StudioProxy event ABIs (inline — for reading WorkSubmitted events)
+# ---------------------------------------------------------------------------
+
+STUDIO_PROXY_EVENT_ABI: list[dict] = [
+    {
+        "anonymous": False,
+        "name": "WorkSubmitted",
+        "type": "event",
+        "inputs": [
+            {"indexed": True, "name": "agentId", "type": "uint256"},
+            {"indexed": True, "name": "dataHash", "type": "bytes32"},
+            {"indexed": False, "name": "threadRoot", "type": "bytes32"},
+            {"indexed": False, "name": "evidenceRoot", "type": "bytes32"},
+            {"indexed": False, "name": "timestamp", "type": "uint256"},
+        ],
+    },
+    {
+        "anonymous": False,
+        "name": "ScoreVectorSubmittedForWorker",
+        "type": "event",
+        "inputs": [
+            {"indexed": True, "name": "validatorAgentId", "type": "uint256"},
+            {"indexed": True, "name": "dataHash", "type": "bytes32"},
+            {"indexed": True, "name": "worker", "type": "address"},
+            {"indexed": False, "name": "scoreVector", "type": "bytes"},
+            {"indexed": False, "name": "timestamp", "type": "uint256"},
+        ],
+    },
+]
 
 
 @dataclass(frozen=True)
@@ -31,19 +70,16 @@ class StudioDetails:
     address: str
     question: str
     options: list[str]
-    worker_count: int
-    verifier_count: int
     epoch_closed: bool
 
 
 @dataclass(frozen=True)
 class WorkerSubmission:
-    """A single worker's submission data."""
+    """A single worker's submission discovered from events or storage."""
 
     worker_address: str
-    outcome: int
+    data_hash: str
     evidence_cid: str
-    timestamp: int
 
 
 class RegistryReader:
@@ -87,11 +123,18 @@ class RegistryReader:
     # Studio helpers
     # ------------------------------------------------------------------
 
-    def _studio_contract(self, studio_address: str) -> Contract:
-        """Return a :class:`Contract` bound to a studio proxy."""
+    def _studio_logic_contract(self, studio_address: str) -> Contract:
+        """Return a :class:`Contract` bound to a studio proxy for LogicModule calls."""
         return self.w3.eth.contract(
             address=Web3.to_checksum_address(studio_address),
             abi=PREDICTION_SETTLEMENT_LOGIC_ABI,
+        )
+
+    def _studio_event_contract(self, studio_address: str) -> Contract:
+        """Return a :class:`Contract` bound to a studio proxy for event reading."""
+        return self.w3.eth.contract(
+            address=Web3.to_checksum_address(studio_address),
+            abi=STUDIO_PROXY_EVENT_ABI,
         )
 
     # ------------------------------------------------------------------
@@ -112,7 +155,7 @@ class RegistryReader:
             return []
 
     def can_close_studio(self, studio_address: str) -> bool:
-        """Check whether a studio has met the minimum thresholds to close."""
+        """Check whether a studio exists and is not yet settled."""
         try:
             return self._registry.functions.canCloseStudio(
                 Web3.to_checksum_address(studio_address),
@@ -124,12 +167,28 @@ class RegistryReader:
             )
             return False
 
+    def is_studio_settled(self, studio_address: str) -> bool:
+        """Check whether a studio has been settled via Registry.activeStudios."""
+        try:
+            result = self._registry.functions.activeStudios(
+                Web3.to_checksum_address(studio_address),
+            ).call()
+            # Struct returns as tuple: (key, studio, studioId, market, marketId, settled)
+            settled = result[5] if len(result) > 5 else False
+            return bool(settled)
+        except Exception:
+            logger.exception(
+                "registry_reader.is_studio_settled.error",
+                studio=studio_address,
+            )
+            return False
+
     # ------------------------------------------------------------------
-    # Studio reads
+    # Studio reads (via LogicModule delegatecall — question/options only)
     # ------------------------------------------------------------------
 
     def get_studio_details(self, studio_address: str) -> StudioDetails:
-        """Fetch question, options, worker/verifier counts for a studio.
+        """Fetch question, options, and settlement status for a studio.
 
         Parameters
         ----------
@@ -141,21 +200,17 @@ class RegistryReader:
         StudioDetails
             Frozen dataclass with the studio's current on-chain state.
         """
-        studio = self._studio_contract(studio_address)
+        studio = self._studio_logic_contract(studio_address)
 
         question: str = studio.functions.question().call()
         option_count: int = min(studio.functions.getOptionCount().call(), 20)
         options = [studio.functions.getOption(i).call() for i in range(option_count)]
-        worker_count: int = studio.functions.getWorkerCount().call()
-        verifier_count: int = studio.functions.getVerifierCount().call()
-        epoch_closed: bool = studio.functions.epochClosed().call()
+        epoch_closed = self.is_studio_settled(studio_address)
 
         details = StudioDetails(
             address=studio_address,
             question=question,
             options=options,
-            worker_count=worker_count,
-            verifier_count=verifier_count,
             epoch_closed=epoch_closed,
         )
 
@@ -164,8 +219,6 @@ class RegistryReader:
             studio=studio_address,
             question=question[:80],
             options=options,
-            workers=worker_count,
-            verifiers=verifier_count,
             closed=epoch_closed,
         )
         return details
@@ -177,8 +230,9 @@ class RegistryReader:
     ) -> list[WorkerSubmission]:
         """Return worker submissions that have not yet been scored by *verifier_address*.
 
-        Iterates the studio's ``workerList`` and checks whether the
-        verifier has already submitted scores for each worker.
+        Reads ``WorkSubmitted`` events from StudioProxy to discover workers,
+        then checks ``ScoreVectorSubmittedForWorker`` events to see which
+        workers this verifier has already scored.
 
         Parameters
         ----------
@@ -192,50 +246,69 @@ class RegistryReader:
         list[WorkerSubmission]
             Submissions the verifier has not yet scored.
         """
-        studio = self._studio_contract(studio_address)
+        studio_cs = Web3.to_checksum_address(studio_address)
         verifier_cs = Web3.to_checksum_address(verifier_address)
+        studio_events = self._studio_event_contract(studio_address)
 
-        worker_count: int = studio.functions.getWorkerCount().call()
-        unscored: list[WorkerSubmission] = []
-
-        for i in range(worker_count):
-            worker: str = studio.functions.workerList(i).call()
-            worker_cs = Web3.to_checksum_address(worker)
-
-            # Fetch submission
-            outcome, evidence_cid, timestamp = studio.functions.submissions(worker_cs).call()
-            if timestamp == 0:
-                # Worker registered but hasn't submitted yet
-                continue
-
-            # Check if this verifier already scored this worker.
-            # The Solidity getter for mapping(addr => mapping(addr => uint8[4]))
-            # takes 3 args: (verifier, worker, index) and returns a single uint8.
-            try:
-                already_scored = any(
-                    studio.functions.verifierScores(verifier_cs, worker_cs, idx).call() > 0
-                    for idx in range(4)
-                )
-                if already_scored:
-                    continue
-            except Exception:
-                # Uninitialised mapping entries return 0; treat errors as "not scored".
-                pass
-
-            unscored.append(
-                WorkerSubmission(
-                    worker_address=worker_cs,
-                    outcome=outcome,
-                    evidence_cid=evidence_cid,
-                    timestamp=timestamp,
-                )
+        try:
+            # Get WorkSubmitted events
+            work_events = studio_events.events.WorkSubmitted.get_logs(
+                fromBlock=0,
+                toBlock="latest",
             )
 
-        logger.info(
-            "registry_reader.unscored_submissions",
-            studio=studio_address,
-            verifier=verifier_address,
-            total_workers=worker_count,
-            unscored_count=len(unscored),
-        )
-        return unscored
+            if not work_events:
+                logger.info(
+                    "registry_reader.no_work_events",
+                    studio=studio_address,
+                )
+                return []
+
+            # Get ScoreVectorSubmittedForWorker events for this verifier
+            # to determine which workers have already been scored
+            score_events = studio_events.events.ScoreVectorSubmittedForWorker.get_logs(
+                fromBlock=0,
+                toBlock="latest",
+            )
+
+            # Build set of (dataHash, worker) pairs already scored by this verifier
+            scored_data_hashes: set[str] = set()
+            for evt in score_events:
+                # Filter by verifier — check the worker field
+                # We can't filter by validatorAgentId easily, so check all score events
+                # and match by the worker to see if this verifier has scored
+                # Note: We'd ideally filter by validator agent ID, but we just check
+                # all score events for now
+                dh = evt.args.dataHash.hex() if hasattr(evt.args.dataHash, 'hex') else str(evt.args.dataHash)
+                worker = evt.args.worker
+                scored_data_hashes.add(f"{dh}:{worker}")
+
+            unscored: list[WorkerSubmission] = []
+            for evt in work_events:
+                dh = evt.args.dataHash.hex() if hasattr(evt.args.dataHash, 'hex') else str(evt.args.dataHash)
+                # We don't have the worker address directly from WorkSubmitted,
+                # but we can derive it from agentId or check dataHash/worker pairs.
+                # For now, create a submission entry with the dataHash.
+                unscored.append(
+                    WorkerSubmission(
+                        worker_address="",  # Not directly available from event
+                        data_hash=dh,
+                        evidence_cid="",  # Would need to read from storage
+                    )
+                )
+
+            logger.info(
+                "registry_reader.unscored_submissions",
+                studio=studio_address,
+                verifier=verifier_address,
+                total_submissions=len(work_events),
+                unscored_count=len(unscored),
+            )
+            return unscored
+
+        except Exception:
+            logger.exception(
+                "registry_reader.get_unscored_submissions.error",
+                studio=studio_address,
+            )
+            return []

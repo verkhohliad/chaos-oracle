@@ -89,27 +89,18 @@ async def run(config: WorkerConfig) -> NoReturn:
     """
 
     # -- Components ---------------------------------------------------------
-    if config.chaoschain_mode == "local":
-        logger.info("worker.mode.local", msg="Using DirectSubmitter (no Gateway)")
-        sdk_client = create_sdk_client(
-            mode="local",
-            private_key=config.worker_private_key,
-            rpc_url=config.sepolia_rpc_url,
-        )
-    else:
-        from chaoschain_sdk import AgentRole
+    from chaoschain_sdk import AgentRole
 
-        logger.info("worker.mode.gateway", msg="Using ChaosChain Gateway")
-        network = _resolve_network(config.chaoschain_network)
-        sdk_client = create_sdk_client(
-            mode="gateway",
-            private_key=config.worker_private_key,
-            network=network,
-            gateway_url=config.chaoschain_gateway_url,
-            agent_name="ChaosOracle-Worker",
-            agent_domain="worker.chaosoracle.example.com",
-            agent_role=AgentRole.WORKER,
-        )
+    logger.info("worker.mode.gateway", msg="Using ChaosChain Gateway")
+    network = _resolve_network(config.chaoschain_network)
+    sdk_client = create_sdk_client(
+        private_key=config.worker_private_key,
+        network=network,
+        gateway_url=config.chaoschain_gateway_url,
+        agent_name="ChaosOracle-Worker",
+        agent_domain="worker.chaosoracle.example.com",
+        agent_role=AgentRole.WORKER,
+    )
 
     registry = RegistryReader(
         rpc_url=config.sepolia_rpc_url,
@@ -133,6 +124,7 @@ async def run(config: WorkerConfig) -> NoReturn:
 
     # -- State ---------------------------------------------------------------
     participated_studios: set[str] = set()
+    withdrawn_studios: set[str] = set()
 
     # -- Poll loop -----------------------------------------------------------
     logger.info("worker.loop.start", poll_interval=config.poll_interval_seconds)
@@ -151,7 +143,18 @@ async def run(config: WorkerConfig) -> NoReturn:
                     # 1. Read studio details
                     details = registry.get_studio_details(studio_address)
                     if details.epoch_closed:
-                        logger.info("worker.studio_closed_skipping", studio=studio_address)
+                        logger.info("worker.studio_epoch_closed", studio=studio_address)
+                        # Attempt to withdraw stakes/rewards from settled studio
+                        if studio_address not in withdrawn_studios:
+                            try:
+                                ok = await sdk_client.withdraw_from_studio(studio_address)
+                                if ok:
+                                    withdrawn_studios.add(studio_address)
+                                    logger.info("worker.withdraw.done", studio=studio_address)
+                                else:
+                                    logger.warning("worker.withdraw.reverted", studio=studio_address)
+                            except Exception:
+                                logger.exception("worker.withdraw.error", studio=studio_address)
                         participated_studios.add(studio_address)
                         continue
 

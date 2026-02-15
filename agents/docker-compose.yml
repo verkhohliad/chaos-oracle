@@ -1,28 +1,103 @@
-version: "3.9"
-
 services:
-  worker:
+  # ── Workers: 3 agents with different models (gateway mode → real Sepolia) ──
+  worker-1:
     build:
       context: .
       dockerfile: Dockerfile
     command: ["python", "-m", "worker.main"]
     env_file:
       - .env
-    restart: unless-stopped
+    environment:
+      - WORKER_PRIVATE_KEY=${WORKER1_KEY}
+      - OPENAI_MODEL=gpt-5-2025-08-07
+    restart: "no"
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
 
-  verifier:
+  worker-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "worker.main"]
+    env_file:
+      - .env
+    environment:
+      - WORKER_PRIVATE_KEY=${WORKER2_KEY}
+      - OPENAI_MODEL=gpt-4.1-2025-04-14
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  worker-3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "worker.main"]
+    env_file:
+      - .env
+    environment:
+      - WORKER_PRIVATE_KEY=${WORKER3_KEY}
+      - WORKER_FORCED_OUTCOME=1
+      - OPENAI_MODEL=gpt-5-mini-2025-08-07
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Verifiers: 3 agents with different models (gateway mode → real Sepolia) ──
+  verifier-1:
     build:
       context: .
       dockerfile: Dockerfile
     command: ["python", "-m", "verifier.main"]
     env_file:
       - .env
-    restart: unless-stopped
+    environment:
+      - VERIFIER_PRIVATE_KEY=${VERIFIER1_KEY}
+      - OPENAI_MODEL=gpt-5-2025-08-07
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  verifier-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "verifier.main"]
+    env_file:
+      - .env
+    environment:
+      - VERIFIER_PRIVATE_KEY=${VERIFIER2_KEY}
+      - OPENAI_MODEL=gpt-4.1-2025-04-14
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  verifier-3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "verifier.main"]
+    env_file:
+      - .env
+    environment:
+      - VERIFIER_PRIVATE_KEY=${VERIFIER3_KEY}
+      - OPENAI_MODEL=gpt-5-mini-2025-08-07
+    restart: "no"
     logging:
       driver: json-file
       options:

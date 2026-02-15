@@ -27,15 +27,6 @@ class VerifierConfig(BaseSettings):
         description="Hex-encoded private key for the verifier agent wallet.",
     )
 
-    # ---- ChaosChain mode ----
-    chaoschain_mode: str = Field(
-        default="gateway",
-        description=(
-            "'gateway' for production (ChaosChain Gateway + x402), "
-            "'local' for direct web3 calls (no Gateway, no ERC-8004)."
-        ),
-    )
-
     # ---- ChaosChain network ----
     chaoschain_gateway_url: str = Field(
         default="https://gateway.chaoscha.in",

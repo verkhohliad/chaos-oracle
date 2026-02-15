@@ -1,3 +1,6 @@
 [submodule "contracts/lib/openzeppelin-contracts"]
 	path = contracts/lib/openzeppelin-contracts
 	url = https://github.com/OpenZeppelin/openzeppelin-contracts
+[submodule "external/chaoschain"]
+	path = external/chaoschain
+	url = https://github.com/ChaosChain/chaoschain.git

@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     )
 
 from shared.constants import (
+    STUDIO_PROXY_WITHDRAW_ABI,
     WORKER_STAKE_WEI,
     VERIFIER_STAKE_WEI,
 )
@@ -196,12 +197,16 @@ class ChaosOracleSDKClient:
         )
         data_hash = self.sdk.w3.keccak(text=evidence_payload_str)
 
+        # StudioProxy requires non-zero threadRoot and evidenceRoot
+        thread_root = self.sdk.w3.keccak(text=f"thread:{studio_address}:{evidence_cid}")
+        evidence_root = self.sdk.w3.keccak(text=f"evidence:{evidence_cid}")
+
         workflow = self.sdk.submit_work_via_gateway(
             studio_address=studio_address,
             epoch=1,
             data_hash=data_hash,
-            thread_root=b"\x00" * 32,
-            evidence_root=b"\x00" * 32,
+            thread_root=thread_root,
+            evidence_root=evidence_root,
             signer_address=self.wallet_address,
         )
 
@@ -279,6 +284,91 @@ class ChaosOracleSDKClient:
         return result
 
     # ------------------------------------------------------------------
+    # Withdraw flow
+    # ------------------------------------------------------------------
+
+    async def withdraw_from_studio(self, studio_address: str) -> bool:
+        """Withdraw available funds (stakes + rewards) from a settled studio.
+
+        Uses the SDK's internal web3 instance to call ``withdraw()``
+        directly on the StudioProxy (no Gateway workflow needed).
+
+        Parameters
+        ----------
+        studio_address:
+            The StudioProxy contract address.
+
+        Returns
+        -------
+        bool
+            ``True`` if the withdrawal transaction succeeded,
+            ``False`` if it reverted or there was nothing to withdraw.
+        """
+        from web3 import Web3
+
+        w3: Web3 = self.sdk.w3
+        account = w3.eth.account.from_key(self._private_key)
+
+        proxy = w3.eth.contract(
+            address=Web3.to_checksum_address(studio_address),
+            abi=STUDIO_PROXY_WITHDRAW_ABI,
+        )
+
+        # Check if there is anything to withdraw
+        try:
+            balance = proxy.functions.getEscrowBalance(account.address).call()
+            logger.info(
+                "sdk_client.withdraw.balance_check",
+                studio=studio_address,
+                escrow_balance_wei=balance,
+            )
+            if balance == 0:
+                logger.info(
+                    "sdk_client.withdraw.nothing_to_withdraw",
+                    studio=studio_address,
+                )
+                return True  # Nothing to withdraw is not an error
+        except Exception:
+            # getEscrowBalance may not reflect _withdrawable; proceed anyway
+            logger.debug(
+                "sdk_client.withdraw.balance_check_skipped",
+                studio=studio_address,
+            )
+
+        try:
+            tx = proxy.functions.withdraw().build_transaction({
+                "from": account.address,
+                "value": 0,
+                "nonce": w3.eth.get_transaction_count(account.address),
+                "gas": 200_000,
+                "gasPrice": w3.eth.gas_price,
+            })
+            signed = account.sign_transaction(tx)
+            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+
+            if receipt["status"] != 1:
+                logger.warning(
+                    "sdk_client.withdraw.reverted",
+                    studio=studio_address,
+                    tx=tx_hash.hex(),
+                )
+                return False
+
+            logger.info(
+                "sdk_client.withdraw.success",
+                studio=studio_address,
+                tx=tx_hash.hex(),
+            )
+            return True
+        except Exception:
+            logger.exception(
+                "sdk_client.withdraw.failed",
+                studio=studio_address,
+            )
+            return False
+
+    # ------------------------------------------------------------------
     # Agent ID cache helpers
     # ------------------------------------------------------------------
 
@@ -311,43 +401,33 @@ class ChaosOracleSDKClient:
 
 
 def create_sdk_client(
-    mode: str,
     private_key: str,
-    rpc_url: str = "",
     network: Any = None,
     gateway_url: str = "",
     agent_name: str = "ChaosOracleAgent",
     agent_domain: str = "agent.chaosoracle.example.com",
     agent_role: Any = None,
-) -> "ChaosOracleSDKClient | DirectSubmitter":
-    """Create the appropriate SDK client based on *mode*.
+    **kwargs: Any,
+) -> "ChaosOracleSDKClient":
+    """Create a ChaosChain SDK client for gateway mode.
 
     Parameters
     ----------
-    mode:
-        ``"local"`` for direct web3 calls (no Gateway / x402 / ERC-8004),
-        ``"gateway"`` for production ChaosChain Gateway.
     private_key:
         Hex-encoded private key for the agent wallet.
-    rpc_url:
-        Ethereum JSON-RPC endpoint (required for ``"local"`` mode).
     network:
-        :class:`NetworkConfig` value (required for ``"gateway"`` mode).
+        :class:`NetworkConfig` value (e.g. ``NetworkConfig.ETHEREUM_SEPOLIA``).
     gateway_url:
-        ChaosChain Gateway URL (required for ``"gateway"`` mode).
+        ChaosChain Gateway URL.
     agent_name:
         Human-readable agent name.
     agent_domain:
         Domain claim for the agent identity token URI.
     agent_role:
         ``AgentRole.WORKER`` or ``AgentRole.VERIFIER``.
+    **kwargs:
+        Ignored (for backwards compatibility with old ``mode``/``rpc_url`` args).
     """
-    if mode == "local":
-        from shared.direct_submitter import DirectSubmitter
-
-        return DirectSubmitter(rpc_url=rpc_url, private_key=private_key)
-
-    # Default: gateway mode
     return ChaosOracleSDKClient(
         private_key=private_key,
         network=network,
