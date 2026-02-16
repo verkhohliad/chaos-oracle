@@ -124,7 +124,10 @@ async def run(config: WorkerConfig) -> NoReturn:
 
     # -- State ---------------------------------------------------------------
     participated_studios: set[str] = set()
+    pending_withdrawal: set[str] = set()
     withdrawn_studios: set[str] = set()
+    withdrawal_attempts: dict[str, int] = {}  # studio -> attempt count
+    MAX_WITHDRAWAL_ATTEMPTS = 12  # ~60s at 5s poll interval
 
     # -- Poll loop -----------------------------------------------------------
     logger.info("worker.loop.start", poll_interval=config.poll_interval_seconds)
@@ -144,17 +147,9 @@ async def run(config: WorkerConfig) -> NoReturn:
                     details = registry.get_studio_details(studio_address)
                     if details.epoch_closed:
                         logger.info("worker.studio_epoch_closed", studio=studio_address)
-                        # Attempt to withdraw stakes/rewards from settled studio
+                        # Defer withdrawal to the pending_withdrawal loop below
                         if studio_address not in withdrawn_studios:
-                            try:
-                                ok = await sdk_client.withdraw_from_studio(studio_address)
-                                if ok:
-                                    withdrawn_studios.add(studio_address)
-                                    logger.info("worker.withdraw.done", studio=studio_address)
-                                else:
-                                    logger.warning("worker.withdraw.reverted", studio=studio_address)
-                            except Exception:
-                                logger.exception("worker.withdraw.error", studio=studio_address)
+                            pending_withdrawal.add(studio_address)
                         participated_studios.add(studio_address)
                         continue
 
@@ -182,6 +177,7 @@ async def run(config: WorkerConfig) -> NoReturn:
                     )
 
                     participated_studios.add(studio_address)
+                    pending_withdrawal.add(studio_address)
                     logger.info(
                         "worker.submission_complete",
                         studio=studio_address,
@@ -192,6 +188,44 @@ async def run(config: WorkerConfig) -> NoReturn:
                 except Exception:
                     logger.exception("worker.studio_processing_error", studio=studio_address)
                     # Do not add to participated so we retry next cycle.
+
+            # -- Withdraw from settled studios ----------------------------------
+            # get_active_studios() only returns unsettled studios, so once a
+            # studio is settled the main loop above will never visit it.  We
+            # check our pending_withdrawal set independently.
+            for studio_addr in list(pending_withdrawal):
+                if studio_addr in withdrawn_studios:
+                    pending_withdrawal.discard(studio_addr)
+                    continue
+                try:
+                    if registry.is_studio_settled(studio_addr):
+                        ok = await sdk_client.withdraw_from_studio(studio_addr)
+                        if ok:
+                            withdrawn_studios.add(studio_addr)
+                            pending_withdrawal.discard(studio_addr)
+                            logger.info("worker.withdraw.done", studio=studio_addr)
+                        else:
+                            # Withdrawable balance is 0 — closeEpoch may not have
+                            # run yet, or this agent simply has no rewards.  Retry
+                            # up to MAX_WITHDRAWAL_ATTEMPTS then give up.
+                            attempts = withdrawal_attempts.get(studio_addr, 0) + 1
+                            withdrawal_attempts[studio_addr] = attempts
+                            if attempts >= MAX_WITHDRAWAL_ATTEMPTS:
+                                logger.info(
+                                    "worker.withdraw.gave_up",
+                                    studio=studio_addr,
+                                    attempts=attempts,
+                                )
+                                withdrawn_studios.add(studio_addr)
+                                pending_withdrawal.discard(studio_addr)
+                            else:
+                                logger.debug(
+                                    "worker.withdraw.retry_later",
+                                    studio=studio_addr,
+                                    attempt=attempts,
+                                )
+                except Exception:
+                    logger.exception("worker.withdraw.error", studio=studio_addr)
 
         except Exception:
             logger.exception("worker.poll_cycle_error")

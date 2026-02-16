@@ -85,7 +85,24 @@ STUDIO_PROXY_VIEW_ABI: list[dict] = [
 ]
 
 # Path to shared evidence mapping file (Docker shared volume)
-_EVIDENCE_MAP_PATH = Path(os.environ.get("SHARED_DIR", "/shared")) / "evidence_map.json"
+_SHARED_DIR_PATH = Path(os.environ.get("SHARED_DIR", "/shared"))
+_EVIDENCE_MAP_PATH = _SHARED_DIR_PATH / "evidence_map.json"
+
+
+def _get_deploy_block() -> int:
+    """Read the deploy block from addresses.json (written by deploy.sh).
+
+    This is used as the ``fromBlock`` for event queries to avoid hitting
+    free-tier Sepolia RPC ``eth_getLogs`` range limits on an Anvil fork.
+    """
+    try:
+        addr_file = _SHARED_DIR_PATH / "addresses.json"
+        if addr_file.exists():
+            data = json.loads(addr_file.read_text())
+            return int(data.get("deployBlock", 0))
+    except Exception:
+        pass
+    return 0
 
 
 @dataclass(frozen=True)
@@ -255,13 +272,16 @@ class RegistryReader:
         options = [studio.functions.getOption(i).call() for i in range(option_count)]
         epoch_closed = self.is_studio_settled(studio_address)
 
-        # Count work submissions via events
+        # Count work submissions via events.
+        # Use deploy block as fromBlock to avoid hitting RPC eth_getLogs range
+        # limits on free-tier Sepolia providers behind an Anvil fork.
         worker_count = 0
         try:
+            from_block = _get_deploy_block()
             studio_events = self._studio_event_contract(studio_address)
             work_events = studio_events.events.WorkSubmitted.get_logs(
-                fromBlock=0,
-                toBlock="latest",
+                from_block=from_block,
+                to_block="latest",
             )
             worker_count = len(work_events)
         except Exception:
@@ -320,10 +340,14 @@ class RegistryReader:
         studio_view = self._studio_view_contract(studio_address)
 
         try:
+            # Use deploy block as fromBlock to avoid hitting RPC eth_getLogs range
+            # limits on free-tier Sepolia providers behind an Anvil fork.
+            from_block = _get_deploy_block()
+
             # Get WorkSubmitted events
             work_events = studio_view.events.WorkSubmitted.get_logs(
-                fromBlock=0,
-                toBlock="latest",
+                from_block=from_block,
+                to_block="latest",
             )
 
             if not work_events:
@@ -333,18 +357,28 @@ class RegistryReader:
                 )
                 return []
 
-            # Get ScoreVectorSubmittedForWorker events to track already-scored
+            # Get ScoreVectorSubmittedForWorker events (DIRECT mode scoring)
             score_events = studio_view.events.ScoreVectorSubmittedForWorker.get_logs(
-                fromBlock=0,
-                toBlock="latest",
+                from_block=from_block,
+                to_block="latest",
             )
 
-            # Build set of worker addresses already scored (for any dataHash)
-            # We track by worker address since a verifier scores each worker once.
-            scored_workers: set[str] = set()
+            # Build set of (worker, dataHash) pairs already scored by ANY
+            # verifier.  We key by (worker, tx.from) so each verifier can
+            # independently score each worker.  Since the event only exposes
+            # ``validatorAgentId`` (not address), we read the tx sender.
+            scored_by_verifier: set[str] = set()  # set of dataHash hex
             for evt in score_events:
-                worker = Web3.to_checksum_address(evt.args.worker)
-                scored_workers.add(worker)
+                try:
+                    tx = self.w3.eth.get_transaction(evt.transactionHash)
+                    scorer_addr = Web3.to_checksum_address(tx["from"])
+                except Exception:
+                    continue
+                if scorer_addr == verifier_cs:
+                    dh = evt.args.dataHash
+                    scored_by_verifier.add(
+                        dh.hex() if hasattr(dh, "hex") else str(dh)
+                    )
 
             # Load shared evidence mapping as fallback for on-chain CIDs
             evidence_map = _load_evidence_map()
@@ -370,8 +404,8 @@ class RegistryReader:
                 if worker_addr == "0x0000000000000000000000000000000000000000":
                     continue
 
-                # Skip if this worker was already scored
-                if worker_addr in scored_workers:
+                # Skip if this verifier already scored this dataHash
+                if dh_hex in scored_by_verifier:
                     continue
 
                 # Resolve evidence CID from on-chain storage

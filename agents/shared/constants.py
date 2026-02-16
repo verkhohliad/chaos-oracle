@@ -110,4 +110,11 @@ STUDIO_PROXY_WITHDRAW_ABI: list[dict] = [
         "stateMutability": "view",
         "type": "function",
     },
+    {
+        "inputs": [{"name": "account", "type": "address"}],
+        "name": "getWithdrawableBalance",
+        "outputs": [{"name": "balance", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
 ]

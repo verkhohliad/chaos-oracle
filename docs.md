@@ -168,8 +168,7 @@ function onScoresSubmitted(uint256 totalSubmissions, uint256 totalScores) extern
 ### 3. Settlement Authorization
 
 ```
-PredictionMarket.setSettler()    <- Only CRE can call (via Registry)
-PredictionMarket.onSettlement()  <- Only the authorized Studio can call
+PredictionMarket.onSettlement()  <- Only the Registry can call (onlyChaosOracleRegistry modifier)
 Studio.closeEpoch()              <- Only CRE can call (via Registry)
 ```
 
@@ -183,7 +182,7 @@ The prediction market calls `registerForSettlement{value: reward}(marketId, ques
 
 ### Phase 2: Studio Creation (CRE Trigger 1 — Every 5 min Cron)
 
-CRE calls `getMarketsReadyForSettlement()` on the Registry. For each market past its deadline, CRE calls `createStudioForMarket(key, proof)`. The Registry creates a Studio (via StudioProxyFactory), funds it with the settlement reward, and calls `predictionMarket.setSettler()`. Emits `StudioCreated`.
+CRE calls `getMarketsReadyForSettlement()` on the Registry. For each market past its deadline, CRE calls `createStudioForMarket(key, proof)`. The Registry creates a Studio (via StudioProxyFactory) and funds it with the settlement reward. Emits `StudioCreated`.
 
 ### Phase 3: Worker Participation
 
@@ -256,10 +255,7 @@ function closeEpoch() external; // onlyCRE via Registry
 
 ```solidity
 interface IChaosOracleSettleable {
-    // CRE sets which studio can settle this market
-    function setSettler(uint256 marketId, address settler) external;
-
-    // Studio calls this when consensus is reached
+    // Registry calls this when consensus is reached
     function onSettlement(uint256 marketId, uint8 outcome, bytes32 proofHash) external;
 }
 ```
@@ -338,7 +334,6 @@ contract YourPredictionMarket is IChaosOracleSettleable {
         string question;
         string[] options;
         uint256 deadline;
-        address settler;      // Set by CRE
         uint8 outcome;        // Set on settlement
         bool settled;
     }
@@ -361,7 +356,6 @@ contract YourPredictionMarket is IChaosOracleSettleable {
             question: question,
             options: options,
             deadline: deadline,
-            settler: address(0),
             outcome: 0,
             settled: false
         });
@@ -388,16 +382,10 @@ contract YourPredictionMarket is IChaosOracleSettleable {
 
     // ---- CHAOSORACLE INTERFACE (required) ----
 
-    function setSettler(uint256 marketId, address settler) external override {
-        require(msg.sender == chaosOracle.creForwarder(), "Only CRE");
-        require(markets[marketId].settler == address(0), "Already set");
-        markets[marketId].settler = settler;
-    }
-
     function onSettlement(
         uint256 marketId, uint8 outcome, bytes32 proofHash
     ) external override {
-        require(msg.sender == markets[marketId].settler, "Only settler");
+        require(msg.sender == address(chaosOracle), "Only registry");
         require(!markets[marketId].settled, "Already settled");
         markets[marketId].outcome = outcome;
         markets[marketId].settled = true;
@@ -563,7 +551,7 @@ def run_verifier(studio_address: str, data_hash, worker_address: str):
 
 | # | Action |
 |---|--------|
-| 20 | `cd demo && ./create_market.sh` — creates market + registers for settlement |
+| 20 | `cd sandbox && docker compose up --build` — runs full local sandbox |
 | 21 | `./place_bet.sh` — place bets on both sides |
 | 22 | Wait for market deadline to pass |
 | 23 | CRE Trigger 1 fires -> creates ChaosChain Studio automatically |

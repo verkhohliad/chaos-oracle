@@ -1,0 +1,366 @@
+# ChaosOracle Full Local Sandbox
+#
+# 13 services: anvil, postgres, ipfs, otterscan, gateway, deployer,
+# orchestrator, 3 workers, 3 verifiers.
+#
+# Quick start:
+#   cp .env.example .env   # Set SEPOLIA_RPC and OPENAI_API_KEY
+#   docker compose up --build
+
+services:
+  # ── Infrastructure ──
+
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:stable
+    entrypoint: ["anvil"]
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--fork-url"
+      - "${SEPOLIA_RPC:?SEPOLIA_RPC is required for Anvil fork}"
+      - "--chain-id"
+      - "11155111"
+      - "--block-time"
+      - "2"
+    ports:
+      - "8545:8545"
+    healthcheck:
+      test: ["CMD", "cast", "block-number", "--rpc-url", "http://localhost:8545"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+      POSTGRES_DB: chaoschain
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d chaoschain"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  ipfs:
+    image: ipfs/kubo:latest
+    ports:
+      - "5001:5001"   # API
+      - "8080:8080"   # Gateway
+    environment:
+      - IPFS_PROFILE=test
+    volumes:
+      - ipfsdata:/data/ipfs
+
+  otterscan:
+    image: otterscan/otterscan:latest
+    environment:
+      - ERIGON_URL=http://anvil:8545
+    ports:
+      - "5100:80"
+    depends_on:
+      anvil:
+        condition: service_healthy
+
+  # ── ChaosChain Gateway ──
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: sandbox/Dockerfile.gateway
+    environment:
+      - PORT=3000
+      - HOST=0.0.0.0
+      - LOG_LEVEL=info
+      - DATABASE_URL=postgresql://gateway:gateway@postgres:5432/chaoschain
+      - RPC_URL=http://anvil:8545
+      - CHAIN_ID=11155111
+      - CONFIRMATION_BLOCKS=1
+      - CHAOS_CORE_ADDRESS=0xF6a57f04736A52a38b273b0204d636506a780E67
+      - REWARDS_DISTRIBUTOR_ADDRESS=0x0549772a3fF4F095C57AEFf655B3ed97B7925C19
+      - USE_MOCK_ARWEAVE=true
+      - SIGNER_PRIVATE_KEY=${GATEWAY_SIGNER_KEY}
+      # Sandbox: shared gateway holds all agent keys (production: each agent runs own gateway)
+      - SIGNER_PRIVATE_KEY_2=${WORKER1_KEY}
+      - SIGNER_PRIVATE_KEY_3=${WORKER2_KEY}
+      - SIGNER_PRIVATE_KEY_4=${WORKER3_KEY}
+      - SIGNER_PRIVATE_KEY_5=${VERIFIER1_KEY}
+      - SIGNER_PRIVATE_KEY_6=${VERIFIER2_KEY}
+      - SIGNER_PRIVATE_KEY_7=${VERIFIER3_KEY}
+    ports:
+      - "3000:3000"
+    depends_on:
+      anvil:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Deployer: One-shot contract deployment to local Anvil fork ──
+
+  deployer:
+    build:
+      context: ..
+      dockerfile: sandbox/Dockerfile.foundry
+    entrypoint: ["bash"]
+    command: ["/app/scripts/deploy.sh"]
+    environment:
+      - RPC_URL=http://anvil:8545
+      - DEPLOYER_PRIVATE_KEY=${DEPLOYER_PRIVATE_KEY}
+      - GATEWAY_SIGNER_KEY=${GATEWAY_SIGNER_KEY}
+      - WORKER1_KEY=${WORKER1_KEY}
+      - WORKER2_KEY=${WORKER2_KEY}
+      - WORKER3_KEY=${WORKER3_KEY}
+      - VERIFIER1_KEY=${VERIFIER1_KEY}
+      - VERIFIER2_KEY=${VERIFIER2_KEY}
+      - VERIFIER3_KEY=${VERIFIER3_KEY}
+      - SHARED_DIR=/shared
+    depends_on:
+      anvil:
+        condition: service_healthy
+    volumes:
+      - shared:/shared
+
+  # ── Orchestrator: Drives the lifecycle (simulates CRE triggers) ──
+
+  orchestrator:
+    build:
+      context: ..
+      dockerfile: sandbox/Dockerfile.foundry
+    entrypoint: ["bash"]
+    command: ["/app/scripts/orchestrate.sh"]
+    environment:
+      - RPC_URL=http://anvil:8545
+      - DEPLOYER_PRIVATE_KEY=${DEPLOYER_PRIVATE_KEY}
+      - BETTOR1_KEY=${BETTOR1_KEY}
+      - BETTOR2_KEY=${BETTOR2_KEY}
+      - GATEWAY_SIGNER_KEY=${GATEWAY_SIGNER_KEY}
+      - GATEWAY_URL=http://gateway:3000
+      - USE_ANVIL_TIME_WARP=true
+      - SHARED_DIR=/shared
+      - WORKER1_KEY=${WORKER1_KEY}
+      - WORKER2_KEY=${WORKER2_KEY}
+      - WORKER3_KEY=${WORKER3_KEY}
+      - VERIFIER1_KEY=${VERIFIER1_KEY}
+      - VERIFIER2_KEY=${VERIFIER2_KEY}
+      - VERIFIER3_KEY=${VERIFIER3_KEY}
+    depends_on:
+      deployer:
+        condition: service_completed_successfully
+      gateway:
+        condition: service_started
+    volumes:
+      - shared:/shared
+
+  # ── Workers: 3 real agents using local ChaosChain Gateway ──
+
+  worker-1:
+    build:
+      context: ..
+      dockerfile: sandbox/Dockerfile.agents
+    entrypoint: >
+      sh -c '
+        echo "Waiting for addresses.json..."
+        while [ ! -f /shared/addresses.json ]; do sleep 1; done
+        export CHAOS_ORACLE_REGISTRY_ADDRESS=$$(python -c "import json; print(json.load(open(\"/shared/addresses.json\"))[\"registry\"])")
+        echo "Registry: $$CHAOS_ORACLE_REGISTRY_ADDRESS"
+        python -m worker.main
+      '
+    environment:
+      - SEPOLIA_RPC_URL=http://anvil:8545
+      - CHAOSCHAIN_GATEWAY_URL=http://gateway:3000
+      - CHAOSCHAIN_NETWORK=ethereum_sepolia
+      - WORKER_PRIVATE_KEY=${WORKER1_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - POLL_INTERVAL_SECONDS=5
+      - OPENAI_MODEL=gpt-4.1-2025-04-14
+      - IPFS_API_URL=http://ipfs:5001
+      - SHARED_DIR=/shared
+    depends_on:
+      deployer:
+        condition: service_completed_successfully
+      gateway:
+        condition: service_started
+      ipfs:
+        condition: service_started
+    volumes:
+      - shared:/shared
+    restart: "no"
+
+  worker-2:
+    build:
+      context: ..
+      dockerfile: sandbox/Dockerfile.agents
+    entrypoint: >
+      sh -c '
+        echo "Waiting for addresses.json..."
+        while [ ! -f /shared/addresses.json ]; do sleep 1; done
+        export CHAOS_ORACLE_REGISTRY_ADDRESS=$$(python -c "import json; print(json.load(open(\"/shared/addresses.json\"))[\"registry\"])")
+        echo "Registry: $$CHAOS_ORACLE_REGISTRY_ADDRESS"
+        python -m worker.main
+      '
+    environment:
+      - SEPOLIA_RPC_URL=http://anvil:8545
+      - CHAOSCHAIN_GATEWAY_URL=http://gateway:3000
+      - CHAOSCHAIN_NETWORK=ethereum_sepolia
+      - WORKER_PRIVATE_KEY=${WORKER2_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - POLL_INTERVAL_SECONDS=5
+      - OPENAI_MODEL=gpt-4.1-2025-04-14
+      - IPFS_API_URL=http://ipfs:5001
+      - SHARED_DIR=/shared
+    depends_on:
+      deployer:
+        condition: service_completed_successfully
+      gateway:
+        condition: service_started
+      ipfs:
+        condition: service_started
+    volumes:
+      - shared:/shared
+    restart: "no"
+
+  worker-3:
+    build:
+      context: ..
+      dockerfile: sandbox/Dockerfile.agents
+    entrypoint: >
+      sh -c '
+        echo "Waiting for addresses.json..."
+        while [ ! -f /shared/addresses.json ]; do sleep 1; done
+        export CHAOS_ORACLE_REGISTRY_ADDRESS=$$(python -c "import json; print(json.load(open(\"/shared/addresses.json\"))[\"registry\"])")
+        echo "Registry: $$CHAOS_ORACLE_REGISTRY_ADDRESS"
+        python -m worker.main
+      '
+    environment:
+      - SEPOLIA_RPC_URL=http://anvil:8545
+      - CHAOSCHAIN_GATEWAY_URL=http://gateway:3000
+      - CHAOSCHAIN_NETWORK=ethereum_sepolia
+      - WORKER_PRIVATE_KEY=${WORKER3_KEY}
+      - WORKER_FORCED_OUTCOME=1
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - POLL_INTERVAL_SECONDS=5
+      - OPENAI_MODEL=gpt-4.1-2025-04-14
+      - IPFS_API_URL=http://ipfs:5001
+      - SHARED_DIR=/shared
+    depends_on:
+      deployer:
+        condition: service_completed_successfully
+      gateway:
+        condition: service_started
+      ipfs:
+        condition: service_started
+    volumes:
+      - shared:/shared
+    restart: "no"
+
+  # ── Verifiers: 3 real agents using local ChaosChain Gateway ──
+
+  verifier-1:
+    build:
+      context: ..
+      dockerfile: sandbox/Dockerfile.agents
+    entrypoint: >
+      sh -c '
+        echo "Waiting for addresses.json..."
+        while [ ! -f /shared/addresses.json ]; do sleep 1; done
+        export CHAOS_ORACLE_REGISTRY_ADDRESS=$$(python -c "import json; print(json.load(open(\"/shared/addresses.json\"))[\"registry\"])")
+        echo "Registry: $$CHAOS_ORACLE_REGISTRY_ADDRESS"
+        python -m verifier.main
+      '
+    environment:
+      - SEPOLIA_RPC_URL=http://anvil:8545
+      - CHAOSCHAIN_GATEWAY_URL=http://gateway:3000
+      - CHAOSCHAIN_NETWORK=ethereum_sepolia
+      - VERIFIER_PRIVATE_KEY=${VERIFIER1_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - POLL_INTERVAL_SECONDS=5
+      - OPENAI_MODEL=gpt-4.1-2025-04-14
+      - IPFS_API_URL=http://ipfs:5001
+      - SHARED_DIR=/shared
+    depends_on:
+      deployer:
+        condition: service_completed_successfully
+      gateway:
+        condition: service_started
+      ipfs:
+        condition: service_started
+    volumes:
+      - shared:/shared
+    restart: "no"
+
+  verifier-2:
+    build:
+      context: ..
+      dockerfile: sandbox/Dockerfile.agents
+    entrypoint: >
+      sh -c '
+        echo "Waiting for addresses.json..."
+        while [ ! -f /shared/addresses.json ]; do sleep 1; done
+        export CHAOS_ORACLE_REGISTRY_ADDRESS=$$(python -c "import json; print(json.load(open(\"/shared/addresses.json\"))[\"registry\"])")
+        echo "Registry: $$CHAOS_ORACLE_REGISTRY_ADDRESS"
+        python -m verifier.main
+      '
+    environment:
+      - SEPOLIA_RPC_URL=http://anvil:8545
+      - CHAOSCHAIN_GATEWAY_URL=http://gateway:3000
+      - CHAOSCHAIN_NETWORK=ethereum_sepolia
+      - VERIFIER_PRIVATE_KEY=${VERIFIER2_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - POLL_INTERVAL_SECONDS=5
+      - OPENAI_MODEL=gpt-4.1-2025-04-14
+      - IPFS_API_URL=http://ipfs:5001
+      - SHARED_DIR=/shared
+    depends_on:
+      deployer:
+        condition: service_completed_successfully
+      gateway:
+        condition: service_started
+      ipfs:
+        condition: service_started
+    volumes:
+      - shared:/shared
+    restart: "no"
+
+  verifier-3:
+    build:
+      context: ..
+      dockerfile: sandbox/Dockerfile.agents
+    entrypoint: >
+      sh -c '
+        echo "Waiting for addresses.json..."
+        while [ ! -f /shared/addresses.json ]; do sleep 1; done
+        export CHAOS_ORACLE_REGISTRY_ADDRESS=$$(python -c "import json; print(json.load(open(\"/shared/addresses.json\"))[\"registry\"])")
+        echo "Registry: $$CHAOS_ORACLE_REGISTRY_ADDRESS"
+        python -m verifier.main
+      '
+    environment:
+      - SEPOLIA_RPC_URL=http://anvil:8545
+      - CHAOSCHAIN_GATEWAY_URL=http://gateway:3000
+      - CHAOSCHAIN_NETWORK=ethereum_sepolia
+      - VERIFIER_PRIVATE_KEY=${VERIFIER3_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - POLL_INTERVAL_SECONDS=5
+      - OPENAI_MODEL=gpt-4.1-2025-04-14
+      - IPFS_API_URL=http://ipfs:5001
+      - SHARED_DIR=/shared
+    depends_on:
+      deployer:
+        condition: service_completed_successfully
+      gateway:
+        condition: service_started
+      ipfs:
+        condition: service_started
+    volumes:
+      - shared:/shared
+    restart: "no"
+
+volumes:
+  shared:
+  pgdata:
+  ipfsdata:

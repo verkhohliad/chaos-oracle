@@ -28,22 +28,24 @@ Your Market  --->  ChaosOracle Registry  --->  CRE Workflow  --->  ChaosChain St
 
 ---
 
-## Quick Start — Local Demo
+## Quick Start — Local Sandbox
 
-Run the full E2E lifecycle in Docker (9 containers: anvil fork + 3 workers + 3 verifiers + orchestrator):
+Run the full E2E lifecycle in Docker (12 containers: Anvil fork + Gateway + IPFS + PostgreSQL + 3 workers + 3 verifiers + deployer + orchestrator):
 
 ```bash
 # Prerequisites: Docker, Docker Compose, a Sepolia RPC URL (Alchemy/Infura free tier)
 
 git clone https://github.com/AverTechnologies/chaos-oracle.git
-cd chaos-oracle/demo
+cd chaos-oracle
+git submodule update --init --recursive
+cd sandbox
 cp .env.example .env
-# Edit .env — set SEPOLIA_RPC to your Sepolia URL
+# Edit .env — set SEPOLIA_RPC and OPENAI_API_KEY
 
 docker compose up --build
 ```
 
-See [demo/README.md](./demo/README.md) for full instructions, expected output, and troubleshooting.
+See [sandbox/README.md](./sandbox/README.md) for full instructions, expected output, and troubleshooting.
 
 ---
 
@@ -53,7 +55,7 @@ See [demo/README.md](./demo/README.md) for full instructions, expected output, a
 contracts/       Solidity contracts (Registry, SettlementLogic, ExampleMarket)
 agents/          Python worker & verifier agents
 cre-workflow/    Chainlink CRE settlement workflow (TypeScript)
-demo/            Docker Compose E2E demo
+sandbox/         Full local sandbox (12 Docker services)
 abis/            Contract ABIs (generated from forge build)
 scripts/         Helper scripts (ABI export, etc.)
 ```
@@ -64,7 +66,7 @@ scripts/         Helper scripts (ABI export, etc.)
 
 | I want to... | Start here |
 |--------------|------------|
-| **Run the demo** | [demo/README.md](./demo/README.md) |
+| **Run the sandbox** | [sandbox/README.md](./sandbox/README.md) |
 | **Integrate my prediction market** | [docs.md — For Prediction Market Developers](./docs.md#for-prediction-market-developers) |
 | **Build an AI agent** | [docs.md — For AI Agent Developers](./docs.md#for-ai-agent-developers) |
 | **Understand the architecture** | [docs.md — Architecture](./docs.md#architecture) |
@@ -114,8 +116,8 @@ Full technical documentation — architecture diagrams, security model, complete
 
 ```bash
 cd contracts
-forge test --skip ForkIntegration.t.sol        # 67 unit + integration tests
-forge test --match-contract ForkIntegrationTest --fork-url $SEPOLIA_RPC  # 1 fork test
+forge test --skip ForkIntegration        # 59 unit + integration tests
+forge test --match-contract ForkIntegrationTest --fork-url $SEPOLIA_RPC -vvv  # 3 fork tests
 ```
 
-68 tests across 5 suites — see [contracts/README.md](./contracts/README.md) for details.
+62 tests across 5 suites — see [contracts/README.md](./contracts/README.md) for details.
