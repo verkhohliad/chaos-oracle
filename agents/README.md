@@ -25,7 +25,7 @@ Cloud-ready Python asyncio daemons for autonomous prediction market settlement. 
                       │ outbound HTTPS only
          ┌────────────┼────────────────┐
          │            │                │
-    Ethereum RPC   ChaosChain     Arweave / OpenAI
+    Ethereum RPC   ChaosChain     IPFS/Arweave + OpenAI
     (read state)   Gateway        (evidence + LLM)
                    (x402 payment)
 ```
@@ -41,10 +41,12 @@ Every `POLL_INTERVAL_SECONDS` (default 30):
    - Read question and options from StudioProxy
    - Research the question using OpenAI (web search + analysis)
    - Build evidence package (JSON with outcome, confidence, sources, reasoning)
-   - Upload evidence to Arweave, get CID
+   - Upload evidence to IPFS (sandbox) or Arweave (production), get CID
+   - Write `{dataHash: evidenceCID}` to shared `evidence_map.json` for cross-agent resolution
    - Register as worker on studio (stake 0.001 ETH)
    - Submit work via ChaosChain Gateway (x402 payment)
 3. Track participated studios (in-memory set)
+4. After settlement, withdraw stake + rewards from studio
 
 ## Verifier Agent Flow
 
@@ -52,12 +54,14 @@ Every `POLL_INTERVAL_SECONDS` (default 5):
 
 1. Poll `ChaosOracleRegistry.getActiveStudios()` via RPC
 2. For each studio with unscored submissions:
-   - Fetch worker's evidence package from Arweave
+   - Fetch worker's evidence package from IPFS/Arweave (resolves CID via on-chain storage or shared `evidence_map.json`)
    - Audit evidence using OpenAI (accuracy, source quality, reasoning)
    - Register as verifier on studio (stake 0.001 ETH)
    - Submit scores via ChaosChain Gateway (x402 payment)
    - Scores: `[accuracy, evidence_quality, source_diversity, reasoning_depth]` (each 0-100)
+   - Each verifier scores **all** workers (e.g. 3 verifiers x 3 workers = 9 total score events)
 3. Track scored (studio, worker) pairs (in-memory set)
+4. After settlement, withdraw stake + rewards from studio
 
 ## ERC-8004 Identity
 
@@ -107,6 +111,9 @@ cp .env.example .env
 | `OPENAI_MODEL` | Both | Model identifier (default: `gpt-4o`) |
 | `POLL_INTERVAL_SECONDS` | Both | Poll interval (default: `30`) |
 | `ARWEAVE_WALLET_PATH` | Optional | Path to Arweave JWK wallet (empty = stub mode) |
+| `IPFS_API_URL` | Optional | IPFS API URL for sandbox (e.g. `http://ipfs:5001`); takes priority over Arweave |
+| `SHARED_DIR` | Optional | Path to shared volume for `evidence_map.json` (default: `/shared`) |
+| `WORKER_FORCED_OUTCOME` | Optional | Force a specific outcome index (testing — simulates a bad actor for slashing) |
 
 ## Running Locally
 
@@ -155,7 +162,7 @@ agents/
 │   ├── __init__.py
 │   ├── sdk_client.py       # ChaosChain SDK wrapper (ERC-8004, x402, Gateway)
 │   ├── registry_reader.py  # Read ChaosOracleRegistry + StudioProxy on-chain
-│   ├── arweave_client.py   # Upload/fetch evidence to/from Arweave
+│   ├── arweave_client.py   # Upload/fetch evidence to/from IPFS (sandbox) or Arweave (prod)
 │   └── constants.py        # Contract addresses, ABIs, network configs
 ├── worker/
 │   ├── __init__.py

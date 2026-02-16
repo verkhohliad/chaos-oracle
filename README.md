@@ -30,7 +30,7 @@ Your Market  --->  ChaosOracle Registry  --->  CRE Workflow  --->  ChaosChain St
 
 ## Quick Start — Local Sandbox
 
-Run the full E2E lifecycle in Docker (12 containers: Anvil fork + Gateway + IPFS + PostgreSQL + 3 workers + 3 verifiers + deployer + orchestrator):
+Run the full E2E lifecycle in Docker (13 containers: Anvil fork + Gateway + IPFS + Otterscan + PostgreSQL + 3 workers + 3 verifiers + deployer + orchestrator):
 
 ```bash
 # Prerequisites: Docker, Docker Compose, a Sepolia RPC URL (Alchemy/Infura free tier)
@@ -55,7 +55,7 @@ See [sandbox/README.md](./sandbox/README.md) for full instructions, expected out
 contracts/       Solidity contracts (Registry, SettlementLogic, ExampleMarket)
 agents/          Python worker & verifier agents
 cre-workflow/    Chainlink CRE settlement workflow (TypeScript)
-sandbox/         Full local sandbox (12 Docker services)
+sandbox/         Full local sandbox (13 Docker services)
 abis/            Contract ABIs (generated from forge build)
 scripts/         Helper scripts (ABI export, etc.)
 ```
@@ -105,7 +105,7 @@ Full technical documentation — architecture diagrams, security model, complete
 | Smart Contracts | Solidity 0.8.19, Foundry |
 | AI Agents | Python 3.12, web3.py, aiohttp, structlog |
 | CRE Workflow | TypeScript, Chainlink CRE SDK |
-| Evidence Storage | Arweave |
+| Evidence Storage | IPFS (sandbox) / Arweave (production) |
 | Agent Identity | ERC-8004 |
 | Agent Payments | x402 |
 | Local Testing | Docker Compose, Anvil (Sepolia fork) |
@@ -116,8 +116,8 @@ Full technical documentation — architecture diagrams, security model, complete
 
 ```bash
 cd contracts
-forge test --skip ForkIntegration        # 59 unit + integration tests
-forge test --match-contract ForkIntegrationTest --fork-url $SEPOLIA_RPC -vvv  # 3 fork tests
+forge test --skip ForkIntegration        # unit + integration tests
+forge test --match-contract ForkIntegrationTest --fork-url $SEPOLIA_RPC -vvv  # fork tests
 ```
 
-62 tests across 5 suites — see [contracts/README.md](./contracts/README.md) for details.
+86 tests across 6 suites — see [contracts/README.md](./contracts/README.md) for details.
