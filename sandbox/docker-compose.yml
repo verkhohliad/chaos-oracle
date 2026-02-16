@@ -60,7 +60,7 @@ services:
   otterscan:
     image: otterscan/otterscan:latest
     environment:
-      - ERIGON_URL=http://anvil:8545
+      - ERIGON_URL=http://localhost:8545
     ports:
       - "5100:80"
     depends_on:

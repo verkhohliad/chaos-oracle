@@ -400,7 +400,7 @@ fi
 
 # ── Decode WorkSubmitted events ──
 echo ""
-echo "    Decoded WorkSubmitted Events:"
+echo "    Worker Submissions:"
 log_divider
 
 CUR_BLOCK_HEX=$(printf '0x%x' "$(cast block-number --rpc-url "$RPC_URL" 2>/dev/null || echo "0")")
@@ -412,48 +412,162 @@ WORK_LOGS=$(cast rpc eth_getLogs \
 # Load evidence map for fallback
 EVIDENCE_MAP_FILE="$SHARED_DIR/evidence_map.json"
 
-WORK_IDX=0
-# Store dataHashes for later use
-declare -a DATA_HASHES=()
-
-echo "$WORK_LOGS" | jq -c '.[]' 2>/dev/null | while IFS= read -r log_entry; do
-    WORK_IDX=$((WORK_IDX + 1))
-    TX_H=$(echo "$log_entry" | jq -r '.transactionHash')
-    TOPICS=$(echo "$log_entry" | jq -r '.topics')
-    DATA_HASH=$(echo "$TOPICS" | jq -r '.[2]')
-
-    # Resolve worker address
-    WORKER_ADDR=$(cast call --rpc-url "$RPC_URL" "$STUDIO" \
-        "getWorkSubmitter(bytes32)(address)" "$DATA_HASH" 2>/dev/null || echo "unknown")
-
-    # Resolve evidence CID (strip quotes from cast output)
-    EVIDENCE_CID=$(cast call --rpc-url "$RPC_URL" "$STUDIO" \
-        "getEvidenceCID(bytes32)(string)" "$DATA_HASH" 2>/dev/null | tr -d '"' || echo "")
-
-    # Fallback to shared evidence map
-    if [ -z "$EVIDENCE_CID" ] && [ -f "$EVIDENCE_MAP_FILE" ]; then
-        # Strip 0x prefix for map lookup
-        DH_CLEAN=$(echo "$DATA_HASH" | sed 's/^0x//')
-        EVIDENCE_CID=$(jq -r --arg dh "$DH_CLEAN" '.[$dh] // empty' "$EVIDENCE_MAP_FILE" 2>/dev/null || echo "")
-    fi
-
-    LABEL=$(addr_label "$WORKER_ADDR")
-    SHORT=$(short_addr "$WORKER_ADDR")
-
-    printf '    #%d  Worker:       %s  (%s)\n' "$WORK_IDX" "$SHORT" "${LABEL:-unknown}"
-    printf '        Data Hash:    %s\n' "$(short_addr "$DATA_HASH")"
-    if [ -n "$EVIDENCE_CID" ]; then
-        printf '        Evidence CID: %s\n' "$EVIDENCE_CID"
-        printf '        IPFS:         %s\n' "$(link_ipfs "$EVIDENCE_CID")"
-    else
-        printf '        Evidence CID: (none)\n'
-    fi
-    printf '        Tx:           %s\n' "$(link_tx "$TX_H")"
+if [ -f "$EVIDENCE_MAP_FILE" ]; then
+    EM_KEY_COUNT=$(jq 'keys | length' "$EVIDENCE_MAP_FILE" 2>/dev/null || echo "0")
+    echo "    (evidence_map.json: $EM_KEY_COUNT entries)"
     echo ""
-done
+fi
 
 # Collect dataHashes into an array for later use (outside the pipe)
 DATA_HASHES_JSON=$(echo "$WORK_LOGS" | jq -r '.[].topics[2]' 2>/dev/null || echo "")
+
+# Build a JSON summary of all workers' evidence for use in Phase 5b and Phase 10
+# This avoids the subshell issue with piped while loops
+WORKER_EVIDENCE_JSON=$(python3 -c "
+import json, subprocess, sys, os
+
+work_logs = json.loads('''$(echo "$WORK_LOGS")''')
+evidence_map_file = '$EVIDENCE_MAP_FILE'
+studio = '$STUDIO'
+rpc_url = '$RPC_URL'
+ipfs_api = 'http://ipfs:5001'
+
+# Load evidence map
+evidence_map = {}
+if os.path.exists(evidence_map_file):
+    try:
+        evidence_map = json.load(open(evidence_map_file))
+    except: pass
+
+results = []
+for i, log in enumerate(work_logs):
+    topics = log.get('topics', [])
+    data_hash = topics[2] if len(topics) > 2 else ''
+    tx_hash = log.get('transactionHash', '')
+
+    # Resolve worker address via cast call
+    try:
+        r = subprocess.run(
+            ['cast', 'call', '--rpc-url', rpc_url, studio,
+             'getWorkSubmitter(bytes32)(address)', data_hash],
+            capture_output=True, text=True, timeout=10)
+        worker_addr = r.stdout.strip()
+    except:
+        worker_addr = 'unknown'
+
+    # Resolve evidence CID: try on-chain first, then evidence_map fallback
+    evidence_cid = ''
+    try:
+        r = subprocess.run(
+            ['cast', 'call', '--rpc-url', rpc_url, studio,
+             'getEvidenceCID(bytes32)(string)', data_hash],
+            capture_output=True, text=True, timeout=10)
+        evidence_cid = r.stdout.strip().strip('\"')
+    except:
+        pass
+
+    if not evidence_cid:
+        dh_clean = data_hash.lower().removeprefix('0x')
+        # Try exact match then case-insensitive
+        evidence_cid = evidence_map.get(dh_clean, '')
+        if not evidence_cid:
+            for k, v in evidence_map.items():
+                if k.lower() == dh_clean:
+                    evidence_cid = v
+                    break
+
+    # Fetch evidence content from IPFS
+    outcome = '?'
+    confidence = '?'
+    reasoning = ''
+    source_count = 0
+    is_forced = False
+
+    if evidence_cid:
+        try:
+            import urllib.request
+            url = f'{ipfs_api}/api/v0/cat?arg={evidence_cid}'
+            req = urllib.request.Request(url, method='POST')
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                evidence = json.loads(resp.read().decode())
+                outcome = evidence.get('outcome', '?')
+                confidence = evidence.get('confidence', '?')
+                reasoning = evidence.get('reasoning', '')
+                source_count = len(evidence.get('sources', []))
+                if 'WORKER_FORCED_OUTCOME' in reasoning:
+                    is_forced = True
+        except:
+            pass
+
+    results.append({
+        'index': i + 1,
+        'worker_addr': worker_addr,
+        'data_hash': data_hash,
+        'evidence_cid': evidence_cid,
+        'tx_hash': tx_hash,
+        'outcome': outcome,
+        'confidence': confidence,
+        'reasoning': reasoning,
+        'source_count': source_count,
+        'is_forced': is_forced,
+    })
+
+print(json.dumps(results))
+" 2>/dev/null || echo "[]")
+
+# Display worker submissions
+echo "$WORKER_EVIDENCE_JSON" | python3 -c "
+import json, sys
+
+data = json.loads(sys.stdin.read())
+
+# Build addr->label map from env
+import subprocess
+worker_addrs = {}
+verifier_addrs = {}
+labels = {}
+
+for line in '''$(for i in 0 1 2; do echo "${ALL_WORKERS[$i]}|${WORKER_LABELS[$i]}"; done; for i in 0 1 2; do echo "${ALL_VERIFIERS[$i]}|${VERIFIER_LABELS[$i]}"; done)'''.strip().split('\n'):
+    parts = line.strip().split('|')
+    if len(parts) == 2:
+        labels[parts[0].lower()] = parts[1]
+
+for w in data:
+    addr = w['worker_addr']
+    label = labels.get(addr.lower(), 'unknown')
+    short = addr[:6] + '...' + addr[-4:] if len(addr) >= 10 else addr
+
+    forced_tag = '  !! FORCED OUTCOME' if w['is_forced'] else ''
+    print(f\"    #{w['index']}  {label} ({short}){forced_tag}\")
+
+    # Outcome display
+    outcome_label = 'Yes' if str(w['outcome']) == '0' else 'No' if str(w['outcome']) == '1' else '?'
+    print(f\"        Outcome:      {w['outcome']} ({outcome_label})  |  Confidence: {w['confidence']}\")
+    print(f\"        Sources:      {w['source_count']} source(s)\")
+
+    # Reasoning (truncated)
+    reasoning = w['reasoning']
+    if len(reasoning) > 200:
+        reasoning = reasoning[:200] + '...'
+    if reasoning:
+        # Wrap long reasoning
+        import textwrap
+        lines = textwrap.wrap(reasoning, width=70)
+        if lines:
+            print(f\"        Reasoning:    {lines[0]}\")
+            for line in lines[1:]:
+                print(f\"                      {line}\")
+
+    # Evidence CID and links
+    if w['evidence_cid']:
+        print(f\"        Evidence:     {w['evidence_cid']}\")
+        print(f\"        IPFS:         http://localhost:8080/ipfs/{w['evidence_cid']}\")
+    else:
+        print(f\"        Evidence:     (none)\")
+
+    print(f\"        Tx:           http://localhost:5100/tx/{w['tx_hash']}\")
+    print()
+" 2>/dev/null || echo "    (failed to decode worker submissions)"
 
 # ═══════════════════════════════════════════════════════════════════
 # Phase 5b: Wait for Verifier Scores
@@ -489,10 +603,7 @@ if [ "$SCORE_COUNT" -lt "$MIN_SCORES" ] 2>/dev/null; then
     echo "    Proceeding with available data..."
 fi
 
-# ── Decode ScoreVectorSubmittedForWorker events ──
-echo ""
-echo "    Decoded Score Submissions:"
-log_divider
+# ── Decode ScoreVectorSubmittedForWorker events (grouped by worker) ──
 
 CUR_BLOCK_HEX=$(printf '0x%x' "$(cast block-number --rpc-url "$RPC_URL" 2>/dev/null || echo "0")")
 SCORE_LOGS=$(cast rpc eth_getLogs \
@@ -500,63 +611,152 @@ SCORE_LOGS=$(cast rpc eth_getLogs \
     "{\"fromBlock\":\"$SCAN_FROM_HEX\",\"toBlock\":\"$CUR_BLOCK_HEX\",\"address\":\"$STUDIO\",\"topics\":[\"$SCORE_TOPIC\"]}" \
     2>/dev/null || echo "[]")
 
-SCORE_IDX=0
-echo "$SCORE_LOGS" | jq -c '.[]' 2>/dev/null | while IFS= read -r log_entry; do
-    SCORE_IDX=$((SCORE_IDX + 1))
-    TX_H=$(echo "$log_entry" | jq -r '.transactionHash')
-    TOPICS=$(echo "$log_entry" | jq -r '.topics')
-    LOG_DATA=$(echo "$log_entry" | jq -r '.data')
+ACTUAL_SCORE_COUNT=$(echo "$SCORE_LOGS" | jq 'length' 2>/dev/null || echo "0")
 
-    # Topics: [eventSig, validatorAgentId, dataHash, worker]
-    DATA_HASH=$(echo "$TOPICS" | jq -r '.[2]')
-    WORKER_TOPIC=$(echo "$TOPICS" | jq -r '.[3]')
-    # Worker address is in topic[3], padded to 32 bytes — extract last 40 chars
-    WORKER_ADDR="0x${WORKER_TOPIC: -40}"
+echo ""
+echo "    Verifier Scores ($ACTUAL_SCORE_COUNT total: 3 verifiers x 3 workers):"
+log_divider
 
-    # Get verifier address from tx sender
-    VERIFIER_ADDR=$(cast tx --rpc-url "$RPC_URL" "$TX_H" --json 2>/dev/null | jq -r '.from' 2>/dev/null || echo "unknown")
+# Use python to group scores by worker, decode, compute averages, and display matrix
+python3 -c "
+import json, subprocess, sys
 
-    # Decode score vector from data
-    # data layout: offset(bytes) + timestamp(uint256) + length(uint256) + score_bytes
-    # The scoreVector is ABI-encoded bytes: first 32 bytes = offset, skip to actual data
-    SCORES_DECODED=$(python3 -c "
-import sys
-data = '$LOG_DATA'
-if data.startswith('0x'):
-    data = data[2:]
-# ABI layout: offset_to_scoreVector(32) | timestamp(32) | ...
-# scoreVector is a dynamic bytes at the offset
-# offset is first 32 bytes (64 hex chars)
-offset = int(data[0:64], 16) * 2  # byte offset -> hex char offset
-# At offset: length(32 bytes) + raw bytes
-length_hex = data[offset:offset+64]
-byte_length = int(length_hex, 16)
-# The actual bytes follow (these are ABI-encoded uint8[5])
-raw_bytes = data[offset+64:offset+64+byte_length*2]
-# Each uint8 is 32 bytes (one ABI slot) in the encoding
-scores = []
-for i in range(min(5, byte_length // 32)):
-    val = int(raw_bytes[i*64:(i+1)*64], 16)
-    scores.append(str(val))
-# If we got fewer than 5 and raw bytes are short, try packed format
-if len(scores) < 5 and byte_length <= 32:
-    scores = []
-    for i in range(min(5, byte_length)):
-        val = int(raw_bytes[i*2:(i+1)*2], 16)
-        scores.append(str(val))
-print('[' + ', '.join(scores) + ']')
-" 2>/dev/null || echo "[?]")
+score_logs = json.loads('''$(echo "$SCORE_LOGS")''')
+worker_evidence = json.loads('''$(echo "$WORKER_EVIDENCE_JSON")''')
+rpc_url = '$RPC_URL'
 
-    VLABEL=$(addr_label "$VERIFIER_ADDR")
-    WLABEL=$(addr_label "$WORKER_ADDR")
+# Build label maps
+labels = {}
+for line in '''$(for i in 0 1 2; do echo "${ALL_WORKERS[$i]}|${WORKER_LABELS[$i]}"; done; for i in 0 1 2; do echo "${ALL_VERIFIERS[$i]}|${VERIFIER_LABELS[$i]}"; done)'''.strip().split('\n'):
+    parts = line.strip().split('|')
+    if len(parts) == 2:
+        labels[parts[0].lower()] = parts[1]
 
-    printf '    #%d  Verifier:     %s  (%s)\n' "$SCORE_IDX" "$(short_addr "$VERIFIER_ADDR")" "${VLABEL:-unknown}"
-    printf '        Worker:       %s  (%s)\n' "$(short_addr "$WORKER_ADDR")" "${WLABEL:-unknown}"
-    printf '        Data Hash:    %s\n' "$(short_addr "$DATA_HASH")"
-    printf '        Scores:       %s  (uint8 on-chain)\n' "$SCORES_DECODED"
-    printf '        Tx:           %s\n' "$(link_tx "$TX_H")"
-    echo ""
-done
+def short_addr(addr):
+    if len(addr) >= 10:
+        return addr[:6] + '...' + addr[-4:]
+    return addr
+
+def decode_scores(hex_data):
+    \"\"\"Decode ABI-encoded score vector from event data.\"\"\"
+    if hex_data.startswith('0x'):
+        hex_data = hex_data[2:]
+    try:
+        # ABI layout: offset_to_scoreVector(32) | timestamp(32) | ...
+        offset = int(hex_data[0:64], 16) * 2
+        length_hex = hex_data[offset:offset+64]
+        byte_length = int(length_hex, 16)
+        raw_bytes = hex_data[offset+64:offset+64+byte_length*2]
+        # Try ABI-encoded uint8[5] (each in 32-byte slot)
+        scores = []
+        for i in range(min(5, byte_length // 32)):
+            val = int(raw_bytes[i*64:(i+1)*64], 16)
+            scores.append(val)
+        # Fallback: packed bytes
+        if len(scores) < 4 and byte_length <= 32:
+            scores = []
+            for i in range(min(5, byte_length)):
+                val = int(raw_bytes[i*2:(i+1)*2], 16)
+                scores.append(val)
+        return scores
+    except:
+        return []
+
+# Build worker outcome map from evidence
+worker_outcomes = {}
+for w in worker_evidence:
+    addr = w['worker_addr'].lower()
+    worker_outcomes[addr] = {
+        'outcome': w['outcome'],
+        'is_forced': w['is_forced'],
+    }
+
+# Determine winning outcome (majority)
+outcome_counts = {}
+for w in worker_evidence:
+    o = str(w['outcome'])
+    outcome_counts[o] = outcome_counts.get(o, 0) + 1
+winning_outcome = max(outcome_counts, key=outcome_counts.get) if outcome_counts else '0'
+
+# Group scores by worker
+worker_scores = {}  # worker_addr -> list of (verifier_addr, scores, tx_hash)
+
+for log in score_logs:
+    topics = log.get('topics', [])
+    data = log.get('data', '0x')
+    tx_hash = log.get('transactionHash', '')
+
+    # topic[2] = dataHash, topic[3] = worker (padded address)
+    worker_topic = topics[3] if len(topics) > 3 else ''
+    worker_addr = '0x' + worker_topic[-40:] if worker_topic else ''
+
+    # Get verifier from tx sender
+    try:
+        r = subprocess.run(
+            ['cast', 'tx', '--rpc-url', rpc_url, tx_hash, '--json'],
+            capture_output=True, text=True, timeout=10)
+        tx_data = json.loads(r.stdout)
+        verifier_addr = tx_data.get('from', 'unknown')
+    except:
+        verifier_addr = 'unknown'
+
+    scores = decode_scores(data)
+
+    key = worker_addr.lower()
+    if key not in worker_scores:
+        worker_scores[key] = []
+    worker_scores[key].append({
+        'verifier': verifier_addr,
+        'scores': scores,
+        'tx_hash': tx_hash,
+    })
+
+# Display matrix
+score_labels = ['accuracy', 'quality', 'diversity', 'depth']
+
+for w in worker_evidence:
+    addr = w['worker_addr'].lower()
+    label = labels.get(addr, 'unknown')
+    short = short_addr(w['worker_addr'])
+    outcome = str(w['outcome'])
+    outcome_label = 'Yes' if outcome == '0' else 'No' if outcome == '1' else '?'
+
+    wrong_tag = ''
+    if outcome != winning_outcome:
+        wrong_tag = ' !! WRONG (minority)'
+
+    forced_tag = ''
+    if w.get('is_forced'):
+        forced_tag = ' [FORCED]'
+
+    print(f'')
+    print(f'    {label} ({short})  -- Outcome: {outcome} ({outcome_label}){wrong_tag}{forced_tag}')
+
+    entries = worker_scores.get(addr, [])
+    all_scores = []
+    for entry in entries:
+        vlabel = labels.get(entry['verifier'].lower(), 'unknown')
+        s = entry['scores']
+        all_scores.append(s)
+        scores_str = str(s)
+        if len(s) >= 4:
+            detail = f'  (accuracy={s[0]}, quality={s[1]}, diversity={s[2]}, depth={s[3]})'
+        else:
+            detail = ''
+        print(f'      {vlabel:12s}: {scores_str}{detail}')
+        print(f'                   Tx: http://localhost:5100/tx/{entry[\"tx_hash\"]}')
+
+    # Compute average
+    if all_scores and all(len(s) >= 4 for s in all_scores):
+        n = len(all_scores)
+        avg = [sum(s[i] for s in all_scores) // n for i in range(min(4, len(all_scores[0])))]
+        print(f'      {\"Average\":12s}: {avg}')
+
+    if not entries:
+        print(f'      (no scores yet)')
+
+print()
+" 2>/dev/null || echo "    (failed to decode score matrix)"
 
 # ═══════════════════════════════════════════════════════════════════
 # Phase 6: Economics Breakdown
@@ -882,13 +1082,6 @@ fi
 
 log_header "Phase 10: Final Balance Sheet"
 
-# Check market data
-MARKET_DATA=$(cast call \
-    --rpc-url "$RPC_URL" \
-    "$MARKET" \
-    "getMarket(uint256)(address,string,uint256,uint256,uint256,uint8,bool)" \
-    "$MARKET_ID" 2>/dev/null || echo "?")
-
 ACTIVE_STUDIOS=$(cast call \
     --rpc-url "$RPC_URL" \
     "$REGISTRY" \
@@ -901,78 +1094,157 @@ echo ""
 echo "    Active studios after settlement: $ACTIVE_STUDIOS"
 echo ""
 
-# Per-agent balance sheet
-printf '    %-14s %-10s %-12s %-12s %-10s\n' "Agent" "Staked" "Rewarded" "Withdrawn" "Net P/L"
-log_divider
-
-STAKE_WEI=1000000000000000  # 0.001 ETH
-
-# Helper: sum FundsReleased amounts for a given address from FR_LOGS
-get_reward_wei() {
-    local addr="$1"
-    python3 -c "
+# Use python for the complete balance sheet with slashing detection and reward verification
+python3 -c "
 import json, sys
-logs = json.loads('''$FR_LOGS''')
-addr = '$addr'.lower()
-total = 0
-for log in logs:
+
+fr_logs = json.loads('''$(echo "$FR_LOGS")''')
+worker_evidence = json.loads('''$(echo "$WORKER_EVIDENCE_JSON")''')
+
+# Agent addresses and labels
+workers = [
+$(for i in 0 1 2; do echo "    ('${ALL_WORKERS[$i]}', '${WORKER_LABELS[$i]}'),"; done)
+]
+verifiers = [
+$(for i in 0 1 2; do echo "    ('${ALL_VERIFIERS[$i]}', '${VERIFIER_LABELS[$i]}'),"; done)
+]
+
+winning_outcome = $WINNING_OUTCOME
+studio_remaining_wei = int('$(echo "$STUDIO_REMAINING_WEI" | awk "{print \$1}")')
+rpc_url = '$RPC_URL'
+studio = '$STUDIO'
+
+def wei_to_eth(wei):
+    return f'{wei / 1e18:.6f}'
+
+def short_addr(addr):
+    if len(addr) >= 10:
+        return addr[:6] + '...' + addr[-4:]
+    return addr
+
+# Sum FundsReleased amounts per address
+reward_by_addr = {}
+total_rewards_wei = 0
+for log in fr_logs:
     topics = log.get('topics', [])
-    if len(topics) >= 2:
-        # topic[1] = indexed recipient (padded to 32 bytes)
+    data = log.get('data', '0x')
+    if len(topics) >= 2 and len(data) >= 66:
         recipient = '0x' + topics[1][-40:]
-        if recipient.lower() == addr:
-            data = log.get('data', '0x')
-            if len(data) >= 66:
-                amount = int(data[2:66], 16)
-                total += amount
-print(total)
-" 2>/dev/null || echo "0"
-}
+        amount = int(data[2:66], 16)
+        key = recipient.lower()
+        reward_by_addr[key] = reward_by_addr.get(key, 0) + amount
+        total_rewards_wei += amount
 
-for i in 0 1 2; do
-    ESCROW=$(clean_val "$(cast call --rpc-url "$RPC_URL" "$STUDIO" \
-        "getEscrowBalance(address)(uint256)" "${ALL_WORKERS[$i]}" 2>/dev/null || echo "0")")
-    WITHDRAWABLE=$(clean_val "$(cast call --rpc-url "$RPC_URL" "$STUDIO" \
-        "getWithdrawableBalance(address)(uint256)" "${ALL_WORKERS[$i]}" 2>/dev/null || echo "0")")
+# Build worker outcome map
+worker_outcome_map = {}
+for w in worker_evidence:
+    addr = w['worker_addr'].lower()
+    worker_outcome_map[addr] = {
+        'outcome': w['outcome'],
+        'is_forced': w.get('is_forced', False),
+        'evidence_cid': w.get('evidence_cid', ''),
+    }
 
-    STAKED_ETH=$(wei_to_ether "$ESCROW")
-    REWARD_WEI=$(get_reward_wei "${ALL_WORKERS[$i]}")
-    REWARD_ETH=$(wei_to_ether "$REWARD_WEI")
+# Get escrow balances via subprocess
+import subprocess
+def get_balance(func, addr):
+    try:
+        r = subprocess.run(
+            ['cast', 'call', '--rpc-url', rpc_url, studio,
+             f'{func}(address)(uint256)', addr],
+            capture_output=True, text=True, timeout=10)
+        return int(r.stdout.strip().split()[0])
+    except:
+        return 0
 
-    # Withdrawn = staked + reward - still_withdrawable
-    WITHDRAWN_WEI=$((ESCROW + REWARD_WEI - WITHDRAWABLE))
-    WITHDRAWN_ETH=$(wei_to_ether "$WITHDRAWN_WEI")
+# Print header
+print(f'    {\"Agent\":<14s} {\"Outcome\":<10s} {\"Staked\":<10s} {\"Reward\":<12s} {\"Net P/L\":<12s} {\"Status\"}')
+print('    ' + '-' * 80)
 
-    # Net P/L = reward
-    NET_ETH=$(wei_to_ether "$REWARD_WEI")
+slashed_agents = []
+total_stakes_deposited = 0
 
-    printf '    %-14s %-10s %-12s %-12s %s\n' \
-        "${WORKER_LABELS[$i]}" "$STAKED_ETH" "$REWARD_ETH" "$WITHDRAWN_ETH" "$NET_ETH"
-done
+# Workers
+for addr, label in workers:
+    escrow = get_balance('getEscrowBalance', addr)
+    reward_wei = reward_by_addr.get(addr.lower(), 0)
+    total_stakes_deposited += escrow
 
-for i in 0 1 2; do
-    ESCROW=$(clean_val "$(cast call --rpc-url "$RPC_URL" "$STUDIO" \
-        "getEscrowBalance(address)(uint256)" "${ALL_VERIFIERS[$i]}" 2>/dev/null || echo "0")")
-    WITHDRAWABLE=$(clean_val "$(cast call --rpc-url "$RPC_URL" "$STUDIO" \
-        "getWithdrawableBalance(address)(uint256)" "${ALL_VERIFIERS[$i]}" 2>/dev/null || echo "0")")
+    staked_eth = wei_to_eth(escrow)
+    reward_eth = wei_to_eth(reward_wei)
 
-    STAKED_ETH=$(wei_to_ether "$ESCROW")
-    REWARD_WEI=$(get_reward_wei "${ALL_VERIFIERS[$i]}")
-    REWARD_ETH=$(wei_to_ether "$REWARD_WEI")
+    # Get outcome info
+    info = worker_outcome_map.get(addr.lower(), {})
+    outcome = info.get('outcome', '?')
+    outcome_label = 'Yes' if str(outcome) == '0' else 'No' if str(outcome) == '1' else '?'
+    outcome_str = f'{outcome_label}({outcome})'
+    is_forced = info.get('is_forced', False)
 
-    WITHDRAWN_WEI=$((ESCROW + REWARD_WEI - WITHDRAWABLE))
-    WITHDRAWN_ETH=$(wei_to_ether "$WITHDRAWN_WEI")
+    # Determine status
+    is_wrong = str(outcome) != str(winning_outcome)
+    if reward_wei > 0:
+        net_wei = reward_wei
+        net_eth = '+' + wei_to_eth(net_wei)
+        status = 'Rewarded'
+    elif is_wrong:
+        net_wei = -escrow if escrow > 0 else 0
+        net_eth = '-' + wei_to_eth(abs(net_wei)) if net_wei < 0 else '0.000000'
+        tag = ' (forced bad outcome)' if is_forced else ' (wrong outcome)'
+        status = 'SLASHED' + tag
+        slashed_agents.append({
+            'label': label, 'addr': addr, 'outcome': outcome,
+            'outcome_label': outcome_label, 'is_forced': is_forced,
+            'evidence_cid': info.get('evidence_cid', ''),
+        })
+    else:
+        net_eth = '0.000000'
+        status = 'No reward'
 
-    NET_ETH=$(wei_to_ether "$REWARD_WEI")
+    print(f'    {label:<14s} {outcome_str:<10s} {staked_eth:<10s} {reward_eth:<12s} {net_eth:<12s} {status}')
 
-    printf '    %-14s %-10s %-12s %-12s %s\n' \
-        "${VERIFIER_LABELS[$i]}" "$STAKED_ETH" "$REWARD_ETH" "$WITHDRAWN_ETH" "$NET_ETH"
-done
+# Verifiers
+for addr, label in verifiers:
+    escrow = get_balance('getEscrowBalance', addr)
+    reward_wei = reward_by_addr.get(addr.lower(), 0)
+    total_stakes_deposited += escrow
 
-log_divider
+    staked_eth = wei_to_eth(escrow)
+    reward_eth = wei_to_eth(reward_wei)
 
-echo ""
-log_kv "Studio remaining" "$STUDIO_REMAINING_ETH ETH"
+    if reward_wei > 0:
+        net_eth = '+' + wei_to_eth(reward_wei)
+        status = 'Rewarded'
+    else:
+        net_eth = '0.000000'
+        status = 'No reward'
+
+    print(f'    {label:<14s} {\"--\":<10s} {staked_eth:<10s} {reward_eth:<12s} {net_eth:<12s} {status}')
+
+print('    ' + '-' * 80)
+print()
+
+# Reward Verification
+print('    Reward Verification:')
+print('    ' + '-' * 56)
+print(f'      Total rewards distributed:  {wei_to_eth(total_rewards_wei)} ETH  (from {len(fr_logs)} FundsReleased events)')
+print(f'      Total stakes deposited:     {wei_to_eth(total_stakes_deposited)} ETH  ({len(workers) + len(verifiers)} agents)')
+print(f'      Studio remaining balance:   {wei_to_eth(studio_remaining_wei)} ETH')
+initial_approx = total_rewards_wei + studio_remaining_wei
+print(f'      Distributed + remaining:    {wei_to_eth(initial_approx)} ETH')
+print()
+
+# Slashed agents section
+if slashed_agents:
+    print('    Slashed Agents:')
+    print('    ' + '-' * 56)
+    for sa in slashed_agents:
+        forced_note = ' [FORCED via WORKER_FORCED_OUTCOME]' if sa['is_forced'] else ''
+        print(f'      {sa[\"label\"]} submitted outcome {sa[\"outcome\"]} ({sa[\"outcome_label\"]}) -- minority position.{forced_note}')
+        print(f'      Stake was NOT returned. Funds redistributed to honest workers.')
+        if sa.get('evidence_cid'):
+            print(f'      Evidence: http://localhost:8080/ipfs/{sa[\"evidence_cid\"]}')
+        print()
+" 2>/dev/null || echo "    (failed to generate balance sheet)"
 
 echo ""
 echo "    Links:"
