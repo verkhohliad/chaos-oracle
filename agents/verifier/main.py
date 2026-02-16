@@ -239,7 +239,24 @@ def main() -> None:
 
     async def _run_until_shutdown() -> None:
         task = asyncio.create_task(run(config))
-        await shutdown_event.wait()
+        shutdown_future = asyncio.ensure_future(shutdown_event.wait())
+
+        # Wait for either the run task to finish (crash) or a shutdown signal.
+        done, _ = await asyncio.wait(
+            [task, shutdown_future],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        if task in done:
+            exc = task.exception()
+            if exc is not None:
+                logger.error("verifier.run_crashed", error=str(exc))
+                raise exc
+            logger.info("verifier.run_exited_normally")
+            shutdown_future.cancel()
+            return
+
+        # Shutdown signal received — cancel the run task.
         logger.info("verifier.shutting_down")
         task.cancel()
         try:

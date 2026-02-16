@@ -13,7 +13,10 @@ submissions via ``WorkSubmitted`` events from StudioProxy.
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -32,7 +35,7 @@ logger = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# StudioProxy event ABIs (inline — for reading WorkSubmitted events)
+# StudioProxy ABIs (inline — events + view functions)
 # ---------------------------------------------------------------------------
 
 STUDIO_PROXY_EVENT_ABI: list[dict] = [
@@ -62,6 +65,28 @@ STUDIO_PROXY_EVENT_ABI: list[dict] = [
     },
 ]
 
+# View functions for resolving worker addresses and evidence CIDs from dataHashes
+STUDIO_PROXY_VIEW_ABI: list[dict] = [
+    *STUDIO_PROXY_EVENT_ABI,
+    {
+        "inputs": [{"name": "dataHash", "type": "bytes32"}],
+        "name": "getWorkSubmitter",
+        "outputs": [{"name": "submitter", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [{"name": "dataHash", "type": "bytes32"}],
+        "name": "getEvidenceCID",
+        "outputs": [{"name": "evidenceCID", "type": "string"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+# Path to shared evidence mapping file (Docker shared volume)
+_EVIDENCE_MAP_PATH = Path(os.environ.get("SHARED_DIR", "/shared")) / "evidence_map.json"
+
 
 @dataclass(frozen=True)
 class StudioDetails:
@@ -71,6 +96,7 @@ class StudioDetails:
     question: str
     options: list[str]
     epoch_closed: bool
+    worker_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -80,6 +106,21 @@ class WorkerSubmission:
     worker_address: str
     data_hash: str
     evidence_cid: str
+
+
+def _load_evidence_map() -> dict[str, str]:
+    """Load the shared evidence CID mapping from the Docker shared volume.
+
+    Workers write ``{dataHash: evidenceCID}`` here after submitting work.
+    Used as a fallback when ``getEvidenceCID()`` returns empty (single-agent
+    ``submitWork()`` doesn't store the CID on-chain).
+    """
+    if not _EVIDENCE_MAP_PATH.exists():
+        return {}
+    try:
+        return json.loads(_EVIDENCE_MAP_PATH.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 
 class RegistryReader:
@@ -137,6 +178,13 @@ class RegistryReader:
             abi=STUDIO_PROXY_EVENT_ABI,
         )
 
+    def _studio_view_contract(self, studio_address: str) -> Contract:
+        """Return a :class:`Contract` for StudioProxy view functions + events."""
+        return self.w3.eth.contract(
+            address=Web3.to_checksum_address(studio_address),
+            abi=STUDIO_PROXY_VIEW_ABI,
+        )
+
     # ------------------------------------------------------------------
     # Registry reads
     # ------------------------------------------------------------------
@@ -188,7 +236,7 @@ class RegistryReader:
     # ------------------------------------------------------------------
 
     def get_studio_details(self, studio_address: str) -> StudioDetails:
-        """Fetch question, options, and settlement status for a studio.
+        """Fetch question, options, settlement status, and worker count for a studio.
 
         Parameters
         ----------
@@ -207,11 +255,27 @@ class RegistryReader:
         options = [studio.functions.getOption(i).call() for i in range(option_count)]
         epoch_closed = self.is_studio_settled(studio_address)
 
+        # Count work submissions via events
+        worker_count = 0
+        try:
+            studio_events = self._studio_event_contract(studio_address)
+            work_events = studio_events.events.WorkSubmitted.get_logs(
+                fromBlock=0,
+                toBlock="latest",
+            )
+            worker_count = len(work_events)
+        except Exception:
+            logger.debug(
+                "registry_reader.worker_count_fallback",
+                studio=studio_address,
+            )
+
         details = StudioDetails(
             address=studio_address,
             question=question,
             options=options,
             epoch_closed=epoch_closed,
+            worker_count=worker_count,
         )
 
         logger.info(
@@ -220,6 +284,7 @@ class RegistryReader:
             question=question[:80],
             options=options,
             closed=epoch_closed,
+            worker_count=worker_count,
         )
         return details
 
@@ -231,7 +296,11 @@ class RegistryReader:
         """Return worker submissions that have not yet been scored by *verifier_address*.
 
         Reads ``WorkSubmitted`` events from StudioProxy to discover workers,
-        then checks ``ScoreVectorSubmittedForWorker`` events to see which
+        resolves worker addresses via ``getWorkSubmitter(dataHash)`` and
+        evidence CIDs via ``getEvidenceCID(dataHash)`` (with fallback to
+        the shared evidence mapping file).
+
+        Then checks ``ScoreVectorSubmittedForWorker`` events to see which
         workers this verifier has already scored.
 
         Parameters
@@ -248,11 +317,11 @@ class RegistryReader:
         """
         studio_cs = Web3.to_checksum_address(studio_address)
         verifier_cs = Web3.to_checksum_address(verifier_address)
-        studio_events = self._studio_event_contract(studio_address)
+        studio_view = self._studio_view_contract(studio_address)
 
         try:
             # Get WorkSubmitted events
-            work_events = studio_events.events.WorkSubmitted.get_logs(
+            work_events = studio_view.events.WorkSubmitted.get_logs(
                 fromBlock=0,
                 toBlock="latest",
             )
@@ -264,36 +333,66 @@ class RegistryReader:
                 )
                 return []
 
-            # Get ScoreVectorSubmittedForWorker events for this verifier
-            # to determine which workers have already been scored
-            score_events = studio_events.events.ScoreVectorSubmittedForWorker.get_logs(
+            # Get ScoreVectorSubmittedForWorker events to track already-scored
+            score_events = studio_view.events.ScoreVectorSubmittedForWorker.get_logs(
                 fromBlock=0,
                 toBlock="latest",
             )
 
-            # Build set of (dataHash, worker) pairs already scored by this verifier
-            scored_data_hashes: set[str] = set()
+            # Build set of worker addresses already scored (for any dataHash)
+            # We track by worker address since a verifier scores each worker once.
+            scored_workers: set[str] = set()
             for evt in score_events:
-                # Filter by verifier — check the worker field
-                # We can't filter by validatorAgentId easily, so check all score events
-                # and match by the worker to see if this verifier has scored
-                # Note: We'd ideally filter by validator agent ID, but we just check
-                # all score events for now
-                dh = evt.args.dataHash.hex() if hasattr(evt.args.dataHash, 'hex') else str(evt.args.dataHash)
-                worker = evt.args.worker
-                scored_data_hashes.add(f"{dh}:{worker}")
+                worker = Web3.to_checksum_address(evt.args.worker)
+                scored_workers.add(worker)
+
+            # Load shared evidence mapping as fallback for on-chain CIDs
+            evidence_map = _load_evidence_map()
 
             unscored: list[WorkerSubmission] = []
             for evt in work_events:
-                dh = evt.args.dataHash.hex() if hasattr(evt.args.dataHash, 'hex') else str(evt.args.dataHash)
-                # We don't have the worker address directly from WorkSubmitted,
-                # but we can derive it from agentId or check dataHash/worker pairs.
-                # For now, create a submission entry with the dataHash.
+                dh_bytes = evt.args.dataHash
+                dh_hex = dh_bytes.hex() if hasattr(dh_bytes, "hex") else str(dh_bytes)
+
+                # Resolve worker address from on-chain storage
+                try:
+                    worker_addr = studio_view.functions.getWorkSubmitter(dh_bytes).call()
+                    worker_addr = Web3.to_checksum_address(worker_addr)
+                except Exception:
+                    logger.warning(
+                        "registry_reader.getWorkSubmitter_failed",
+                        studio=studio_address,
+                        data_hash=dh_hex,
+                    )
+                    continue
+
+                # Skip zero-address (no submitter recorded)
+                if worker_addr == "0x0000000000000000000000000000000000000000":
+                    continue
+
+                # Skip if this worker was already scored
+                if worker_addr in scored_workers:
+                    continue
+
+                # Resolve evidence CID from on-chain storage
+                evidence_cid = ""
+                try:
+                    evidence_cid = studio_view.functions.getEvidenceCID(dh_bytes).call()
+                except Exception:
+                    logger.debug(
+                        "registry_reader.getEvidenceCID_failed",
+                        data_hash=dh_hex,
+                    )
+
+                # Fallback: check shared evidence mapping file
+                if not evidence_cid:
+                    evidence_cid = evidence_map.get(dh_hex, "")
+
                 unscored.append(
                     WorkerSubmission(
-                        worker_address="",  # Not directly available from event
-                        data_hash=dh,
-                        evidence_cid="",  # Would need to read from storage
+                        worker_address=worker_addr,
+                        data_hash=dh_hex,
+                        evidence_cid=evidence_cid,
                     )
                 )
 

@@ -3,16 +3,18 @@ High-level wrapper around ``ChaosChainAgentSDK`` tailored for ChaosOracle agents
 
 Handles ERC-8004 identity registration, work submission (worker flow), and
 score submission (verifier flow) via the ChaosChain Gateway.
+
+Adapted for **chaoschain-sdk v0.4.1** API.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import tempfile
+import threading
 from pathlib import Path
-from typing import Any
-
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import structlog
 
@@ -21,9 +23,8 @@ if TYPE_CHECKING:
         AgentRole,
         ChaosChainAgentSDK,
         NetworkConfig,
-        X402PaymentManager,
-        GatewayClient,
     )
+    from chaoschain_sdk.gateway_client import GatewayClient
 
 from shared.constants import (
     STUDIO_PROXY_WITHDRAW_ABI,
@@ -36,6 +37,40 @@ logger = structlog.get_logger(__name__)
 # File used to cache agent IDs across restarts so we avoid redundant
 # on-chain identity registration transactions.
 _AGENT_ID_CACHE_PATH = Path("chaoschain_agent_ids.json")
+
+# Shared evidence CID mapping (Docker shared volume).
+# Workers write {dataHash: evidenceCID} here after submitting work.
+# Verifiers read from this file to resolve evidence CIDs when
+# getEvidenceCID() returns empty (submitWork single-agent doesn't store on-chain).
+_EVIDENCE_MAP_PATH = Path(os.environ.get("SHARED_DIR", "/shared")) / "evidence_map.json"
+_EVIDENCE_MAP_LOCK = threading.Lock()
+
+# SDK role integers (StudioProxy registerAgent uses uint8 role codes)
+_ROLE_WORKER = 1
+_ROLE_VERIFIER = 2
+
+
+def _prepare_wallet_file(agent_name: str, private_key: str) -> str:
+    """Create a ``chaoschain_wallets.json`` file pre-loaded with *private_key*.
+
+    The SDK's ``WalletManager`` expects a JSON file keyed by agent name.
+    By writing the private key here we avoid the SDK generating a random
+    wallet and ensure it uses the caller-provided key.
+
+    Returns the path to the wallet file.
+    """
+    from eth_account import Account
+
+    account = Account.from_key(private_key)
+    wallet_data = {
+        agent_name: {
+            "address": account.address,
+            "private_key": private_key if private_key.startswith("0x") else f"0x{private_key}",
+        }
+    }
+    wallet_path = Path(tempfile.gettempdir()) / f"chaoschain_wallet_{agent_name}.json"
+    wallet_path.write_text(json.dumps(wallet_data, indent=2))
+    return str(wallet_path)
 
 
 class ChaosOracleSDKClient:
@@ -69,7 +104,6 @@ class ChaosOracleSDKClient:
         from chaoschain_sdk import (
             AgentRole as _AgentRole,
             ChaosChainAgentSDK,
-            X402PaymentManager,
         )
 
         if agent_role is None:
@@ -81,25 +115,23 @@ class ChaosOracleSDKClient:
         self._agent_name = agent_name
         self._agent_domain = agent_domain
 
-        self.sdk = ChaosChainAgentSDK(
+        # Pre-create wallet file so the SDK uses our private key.
+        wallet_file = _prepare_wallet_file(agent_name, private_key)
+
+        self.sdk: ChaosChainAgentSDK = ChaosChainAgentSDK(
             agent_name=agent_name,
             agent_domain=agent_domain,
             agent_role=agent_role,
             network=network,
-            private_key=private_key,
             enable_process_integrity=True,
+            wallet_file=wallet_file,
             gateway_url=gateway_url,
         )
 
-        self.payment_manager = X402PaymentManager(
-            private_key=private_key,
-            network=network,
-        )
-
-        self.gateway: GatewayClient = self.sdk.gateway
-
+        # Convenience aliases
+        self.gateway: GatewayClient | None = self.sdk.gateway
         self.agent_id: int | None = None
-        self.wallet_address: str = self.sdk.wallet_manager.address
+        self.wallet_address: str = self.sdk.wallet_address
 
         logger.info(
             "sdk_client.initialized",
@@ -107,6 +139,15 @@ class ChaosOracleSDKClient:
             network=str(network),
             role=str(agent_role),
         )
+
+    # ------------------------------------------------------------------
+    # Web3 helper
+    # ------------------------------------------------------------------
+
+    @property
+    def w3(self):
+        """Shortcut to the SDK's Web3 instance."""
+        return self.sdk.chaos_agent.w3
 
     # ------------------------------------------------------------------
     # ERC-8004 identity
@@ -132,7 +173,7 @@ class ChaosOracleSDKClient:
             return cached_id
 
         # 2. Check on-chain via SDK
-        on_chain_id = self.sdk.chaos_agent.get_agent_id()
+        on_chain_id = self.sdk.get_agent_id()
         if on_chain_id:
             logger.info("sdk_client.identity_on_chain", agent_id=on_chain_id)
             self._save_cached_agent_id(on_chain_id)
@@ -141,7 +182,7 @@ class ChaosOracleSDKClient:
 
         # 3. Register new identity
         token_uri = f"https://{self._agent_domain}/.well-known/agent.json"
-        agent_id, _tx = self.sdk.register_agent(token_uri=token_uri)
+        agent_id, _tx = self.sdk.register_identity(token_uri=token_uri)
         logger.info("sdk_client.identity_registered", agent_id=agent_id, token_uri=token_uri)
         self._save_cached_agent_id(agent_id)
         self.agent_id = agent_id
@@ -171,7 +212,7 @@ class ChaosOracleSDKClient:
         Returns
         -------
         dict
-            Gateway workflow result.
+            Gateway workflow result (converted from WorkflowStatus).
         """
         logger.info(
             "sdk_client.submit_work.start",
@@ -180,12 +221,14 @@ class ChaosOracleSDKClient:
             evidence_cid=evidence_cid,
         )
 
-        # Register with studio as worker (includes staking)
-        from chaoschain_sdk import AgentRole
+        if self.agent_id is None:
+            raise RuntimeError("Agent not registered — call auto_register() first.")
 
+        # Register with studio as worker (includes staking)
         self.sdk.register_with_studio(
             studio_address,
-            AgentRole.WORKER,
+            agent_id=self.agent_id,
+            role=_ROLE_WORKER,
             stake_amount=WORKER_STAKE_WEI,
         )
         logger.info("sdk_client.worker_registered", studio=studio_address)
@@ -195,28 +238,41 @@ class ChaosOracleSDKClient:
             {"outcome": outcome, "evidence_cid": evidence_cid},
             sort_keys=True,
         )
-        data_hash = self.sdk.w3.keccak(text=evidence_payload_str)
+        data_hash: bytes = self.w3.keccak(text=evidence_payload_str)
 
         # StudioProxy requires non-zero threadRoot and evidenceRoot
-        thread_root = self.sdk.w3.keccak(text=f"thread:{studio_address}:{evidence_cid}")
-        evidence_root = self.sdk.w3.keccak(text=f"evidence:{evidence_cid}")
+        thread_root: bytes = self.w3.keccak(text=f"thread:{studio_address}:{evidence_cid}")
+        evidence_root: bytes = self.w3.keccak(text=f"evidence:{evidence_cid}")
 
-        workflow = self.sdk.submit_work_via_gateway(
+        # Build evidence content bytes (the Gateway uploads to Arweave/IPFS)
+        evidence_content = evidence_payload_str.encode()
+
+        # submit_work_via_gateway returns a WorkflowStatus (dataclass)
+        workflow_status = self.sdk.submit_work_via_gateway(
             studio_address=studio_address,
             epoch=1,
             data_hash=data_hash,
             thread_root=thread_root,
             evidence_root=evidence_root,
-            signer_address=self.wallet_address,
+            evidence_content=evidence_content,
+            wait_for_completion=True,
         )
 
-        result = self.gateway.wait_for_completion(workflow["id"], timeout=120)
+        state_str = workflow_status.state.value if hasattr(workflow_status.state, "value") else str(workflow_status.state)
         logger.info(
             "sdk_client.submit_work.done",
             studio=studio_address,
-            state=result.get("state"),
+            state=state_str,
         )
-        return result
+
+        # Write evidence CID mapping to shared volume so verifiers can resolve it.
+        # submitWork (single-agent) doesn't store the CID on-chain, so we persist
+        # the mapping {dataHash: evidenceCID} in a shared JSON file.
+        if state_str == "COMPLETED" and evidence_cid:
+            data_hash_hex = data_hash.hex() if hasattr(data_hash, "hex") else str(data_hash)
+            self._write_evidence_mapping(data_hash_hex, evidence_cid)
+
+        return {"state": state_str, "id": workflow_status.id}
 
     # ------------------------------------------------------------------
     # Verifier flow
@@ -243,7 +299,7 @@ class ChaosOracleSDKClient:
         Returns
         -------
         dict
-            Gateway workflow result.
+            Gateway workflow result (converted from WorkflowStatus).
         """
         logger.info(
             "sdk_client.submit_scores.start",
@@ -252,36 +308,38 @@ class ChaosOracleSDKClient:
             scores=scores,
         )
 
-        # Register with studio as verifier (includes staking)
-        from chaoschain_sdk import AgentRole
+        if self.agent_id is None:
+            raise RuntimeError("Agent not registered — call auto_register() first.")
 
+        # Register with studio as verifier (includes staking)
         self.sdk.register_with_studio(
             studio_address,
-            AgentRole.VERIFIER,
+            agent_id=self.agent_id,
+            role=_ROLE_VERIFIER,
             stake_amount=VERIFIER_STAKE_WEI,
         )
         logger.info("sdk_client.verifier_registered", studio=studio_address)
 
         # Build data hash referencing the worker submission
-        data_hash = self.sdk.w3.keccak(text=worker_address.lower())
+        data_hash: bytes = self.w3.keccak(text=worker_address.lower())
 
-        score_workflow = self.sdk.submit_score_via_gateway(
+        # submit_score_via_gateway returns a WorkflowStatus (dataclass)
+        workflow_status = self.sdk.submit_score_via_gateway(
             studio_address=studio_address,
             epoch=1,
             data_hash=data_hash,
-            worker_address=worker_address,
             scores=scores,
-            signer_address=self.wallet_address,
+            wait_for_completion=True,
         )
 
-        result = self.gateway.wait_for_completion(score_workflow["id"], timeout=180)
+        state_str = workflow_status.state.value if hasattr(workflow_status.state, "value") else str(workflow_status.state)
         logger.info(
             "sdk_client.submit_scores.done",
             studio=studio_address,
             worker=worker_address,
-            state=result.get("state"),
+            state=state_str,
         )
-        return result
+        return {"state": state_str, "id": workflow_status.id}
 
     # ------------------------------------------------------------------
     # Withdraw flow
@@ -306,7 +364,7 @@ class ChaosOracleSDKClient:
         """
         from web3 import Web3
 
-        w3: Web3 = self.sdk.w3
+        w3 = self.w3
         account = w3.eth.account.from_key(self._private_key)
 
         proxy = w3.eth.contract(
@@ -367,6 +425,44 @@ class ChaosOracleSDKClient:
                 studio=studio_address,
             )
             return False
+
+    # ------------------------------------------------------------------
+    # Evidence CID mapping (shared volume)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _write_evidence_mapping(data_hash_hex: str, evidence_cid: str) -> None:
+        """Append a ``{dataHash: evidenceCID}`` entry to the shared evidence map.
+
+        Thread-safe via a module-level lock.  Multiple workers may run
+        concurrently in the sandbox, each writing their own mapping.
+        """
+        with _EVIDENCE_MAP_LOCK:
+            mapping: dict[str, str] = {}
+            if _EVIDENCE_MAP_PATH.exists():
+                try:
+                    mapping = json.loads(_EVIDENCE_MAP_PATH.read_text())
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+            # Strip 0x prefix for consistency with registry_reader lookup
+            key = data_hash_hex.removeprefix("0x")
+            mapping[key] = evidence_cid
+
+            try:
+                _EVIDENCE_MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
+                _EVIDENCE_MAP_PATH.write_text(json.dumps(mapping, indent=2))
+                logger.info(
+                    "sdk_client.evidence_mapping_written",
+                    data_hash=key,
+                    evidence_cid=evidence_cid,
+                    path=str(_EVIDENCE_MAP_PATH),
+                )
+            except OSError:
+                logger.exception(
+                    "sdk_client.evidence_mapping_write_failed",
+                    data_hash=key,
+                )
 
     # ------------------------------------------------------------------
     # Agent ID cache helpers

@@ -1,9 +1,10 @@
 """
-Arweave evidence upload / download client for ChaosOracle agents.
+Arweave / IPFS evidence upload & download client for ChaosOracle agents.
 
 Evidence packages are JSON objects conforming to the schema below and are
-stored on Arweave for permanent, verifiable access.  The returned CID
-(content identifier) is submitted on-chain as ``evidenceCID``.
+stored on Arweave (production) or IPFS (sandbox) for permanent, verifiable
+access.  The returned CID (content identifier) is submitted on-chain as
+``evidenceCID``.
 
 Evidence package schema::
 
@@ -17,11 +18,17 @@ Evidence package schema::
         "reasoning": "Free-form reasoning text ...",
         "timestamp": "2025-01-15T10:30:00Z"
     }
+
+Storage backends (priority order):
+1. **IPFS** -- when ``ipfs_api_url`` is set (sandbox: ``http://ipfs:5001``)
+2. **Arweave Bundler** -- when ``wallet_path`` is set (production)
+3. **SHA-256 Stub** -- deterministic hash, no storage (unit tests only)
 """
 
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 import aiohttp
@@ -35,7 +42,7 @@ _DEFAULT_BUNDLER_URL = "https://node2.bundlr.network"
 
 
 class ArweaveClient:
-    """Upload and download evidence packages to/from Arweave.
+    """Upload and download evidence packages to/from Arweave or IPFS.
 
     Parameters
     ----------
@@ -47,6 +54,10 @@ class ArweaveClient:
         Path to an Arweave JWK wallet file (required for uploads in
         production).  When ``None``, uploads use a stub that returns a
         deterministic placeholder CID -- suitable for local testing.
+    ipfs_api_url:
+        IPFS API URL for uploading/downloading evidence (e.g.
+        ``http://ipfs:5001``).  Takes priority over both Arweave and stub.
+        Set via ``IPFS_API_URL`` env var in the sandbox.
     """
 
     def __init__(
@@ -54,16 +65,24 @@ class ArweaveClient:
         gateway_url: str = _DEFAULT_ARWEAVE_GATEWAY,
         bundler_url: str = _DEFAULT_BUNDLER_URL,
         wallet_path: str | None = None,
+        ipfs_api_url: str | None = None,
     ) -> None:
         self._gateway_url = gateway_url.rstrip("/")
         self._bundler_url = bundler_url.rstrip("/")
         self._wallet_path = wallet_path
+        self._ipfs_api_url = (ipfs_api_url or os.environ.get("IPFS_API_URL") or "").rstrip("/") or None
+
+        # Derive IPFS gateway URL from API URL (port 5001 → 8080)
+        self._ipfs_gateway_url: str | None = None
+        if self._ipfs_api_url:
+            self._ipfs_gateway_url = self._ipfs_api_url.replace(":5001", ":8080")
 
         logger.info(
             "arweave_client.initialized",
             gateway=self._gateway_url,
             bundler=self._bundler_url,
             has_wallet=wallet_path is not None,
+            ipfs_api=self._ipfs_api_url,
         )
 
     # ------------------------------------------------------------------
@@ -71,11 +90,10 @@ class ArweaveClient:
     # ------------------------------------------------------------------
 
     async def upload_evidence(self, evidence_package: dict[str, Any]) -> str:
-        """Upload an evidence package to Arweave and return the transaction ID (CID).
+        """Upload an evidence package and return the content identifier (CID).
 
-        In production this would sign the data with the Arweave wallet
-        and post it to the bundler node.  The current implementation
-        provides a working stub that deterministically hashes the payload.
+        Uses IPFS if configured, then Arweave bundler, then falls back to
+        a deterministic SHA-256 stub.
 
         Parameters
         ----------
@@ -85,14 +103,19 @@ class ArweaveClient:
         Returns
         -------
         str
-            Arweave transaction ID usable as ``evidenceCID``.
+            Content identifier (IPFS CID, Arweave TX ID, or stub hash).
         """
         payload_bytes = json.dumps(evidence_package, sort_keys=True).encode()
 
+        # Priority 1: IPFS (sandbox)
+        if self._ipfs_api_url:
+            return await self._upload_via_ipfs(payload_bytes)
+
+        # Priority 2: Arweave bundler (production)
         if self._wallet_path is not None:
             return await self._upload_via_bundler(payload_bytes)
 
-        # Stub: produce a deterministic hash-based CID for local development.
+        # Priority 3: Stub CID (unit tests)
         import hashlib
 
         cid = hashlib.sha256(payload_bytes).hexdigest()
@@ -100,9 +123,46 @@ class ArweaveClient:
             "arweave_client.upload_stub",
             cid=cid,
             size=len(payload_bytes),
-            msg="No Arweave wallet configured; using SHA-256 stub CID.",
+            msg="No IPFS or Arweave wallet configured; using SHA-256 stub CID.",
         )
         return cid
+
+    async def _upload_via_ipfs(self, payload_bytes: bytes) -> str:
+        """Upload data to an IPFS node via the HTTP API.
+
+        Calls ``POST /api/v0/add`` which returns a JSON object with a
+        ``Hash`` field containing the CID.
+        """
+        url = f"{self._ipfs_api_url}/api/v0/add"
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                data = aiohttp.FormData()
+                data.add_field(
+                    "file",
+                    payload_bytes,
+                    filename="evidence.json",
+                    content_type="application/json",
+                )
+                async with session.post(url, data=data, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status in (200, 201):
+                        result = await resp.json()
+                        cid = result.get("Hash", "")
+                        logger.info("arweave_client.ipfs_uploaded", cid=cid, size=len(payload_bytes))
+                        return cid
+                    else:
+                        body = await resp.text()
+                        logger.error(
+                            "arweave_client.ipfs_upload_failed",
+                            status=resp.status,
+                            body=body[:500],
+                        )
+                        raise RuntimeError(
+                            f"IPFS upload failed with status {resp.status}: {body[:200]}"
+                        )
+        except aiohttp.ClientError as exc:
+            logger.exception("arweave_client.ipfs_upload_error")
+            raise RuntimeError(f"IPFS upload error: {exc}") from exc
 
     async def _upload_via_bundler(self, payload_bytes: bytes) -> str:
         """Upload data to an Arweave bundler node.
@@ -148,12 +208,13 @@ class ArweaveClient:
     # ------------------------------------------------------------------
 
     async def fetch_evidence(self, cid: str) -> dict[str, Any]:
-        """Download and parse an evidence package from Arweave.
+        """Download and parse an evidence package from IPFS or Arweave.
 
         Parameters
         ----------
         cid:
-            Arweave transaction ID (or stub CID from :meth:`upload_evidence`).
+            Content identifier — IPFS CID (starts with ``Qm`` or ``bafy``),
+            Arweave TX ID (43-char base64url), or stub CID (64-char hex).
 
         Returns
         -------
@@ -165,6 +226,10 @@ class ArweaveClient:
         RuntimeError
             If the fetch fails or the response is not valid JSON.
         """
+        # IPFS CIDs (CIDv0 starts with "Qm", CIDv1 starts with "bafy")
+        if cid.startswith("Qm") or cid.startswith("bafy"):
+            return await self._fetch_from_ipfs(cid)
+
         # Stub CIDs are 64-char hex SHA-256 hashes (from upload_evidence stub mode).
         # Real Arweave TX IDs are 43-char base64url.  Don't hit the network for stubs.
         if len(cid) == 64 and all(c in "0123456789abcdef" for c in cid):
@@ -179,6 +244,7 @@ class ArweaveClient:
                 "timestamp": "1970-01-01T00:00:00Z",
             }
 
+        # Arweave fetch
         url = f"{self._gateway_url}/{cid}"
         logger.info("arweave_client.fetch.start", cid=cid, url=url)
 
@@ -203,3 +269,48 @@ class ArweaveClient:
         except aiohttp.ClientError as exc:
             logger.exception("arweave_client.fetch_error", cid=cid)
             raise RuntimeError(f"Arweave fetch error for {cid}: {exc}") from exc
+
+    async def _fetch_from_ipfs(self, cid: str) -> dict[str, Any]:
+        """Fetch evidence from an IPFS gateway.
+
+        Tries the configured IPFS gateway (derived from ``ipfs_api_url``)
+        first, then falls back to the public ``ipfs.io`` gateway.
+        """
+        gateways = []
+        if self._ipfs_gateway_url:
+            gateways.append(self._ipfs_gateway_url)
+        gateways.append("https://ipfs.io")
+
+        last_error: Exception | None = None
+        for gateway in gateways:
+            url = f"{gateway}/ipfs/{cid}"
+            logger.info("arweave_client.ipfs_fetch.start", cid=cid, url=url)
+
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                        if resp.status == 200:
+                            data: dict[str, Any] = await resp.json()
+                            logger.info("arweave_client.ipfs_fetch.done", cid=cid)
+                            return data
+                        else:
+                            body = await resp.text()
+                            logger.warning(
+                                "arweave_client.ipfs_fetch_failed",
+                                cid=cid,
+                                gateway=gateway,
+                                status=resp.status,
+                                body=body[:200],
+                            )
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "arweave_client.ipfs_fetch_error",
+                    cid=cid,
+                    gateway=gateway,
+                    error=str(exc),
+                )
+
+        raise RuntimeError(
+            f"IPFS fetch failed for {cid} from all gateways: {last_error}"
+        )
