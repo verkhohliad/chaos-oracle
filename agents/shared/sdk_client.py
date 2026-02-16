@@ -283,6 +283,7 @@ class ChaosOracleSDKClient:
         studio_address: str,
         worker_address: str,
         scores: list[int],
+        data_hash: str | None = None,
     ) -> dict[str, Any]:
         """Register as a verifier (with stake) and submit scores for a worker.
 
@@ -295,6 +296,9 @@ class ChaosOracleSDKClient:
         scores:
             List of score values ``[accuracy, evidence_quality,
             source_diversity, reasoning_depth]``, each 0-100.
+        data_hash:
+            The on-chain data hash from the WorkSubmitted event. If not
+            provided, falls back to ``keccak(worker_address)`` (legacy).
 
         Returns
         -------
@@ -311,24 +315,51 @@ class ChaosOracleSDKClient:
         if self.agent_id is None:
             raise RuntimeError("Agent not registered — call auto_register() first.")
 
-        # Register with studio as verifier (includes staking)
-        self.sdk.register_with_studio(
-            studio_address,
-            agent_id=self.agent_id,
-            role=_ROLE_VERIFIER,
-            stake_amount=VERIFIER_STAKE_WEI,
-        )
-        logger.info("sdk_client.verifier_registered", studio=studio_address)
+        # Register with studio as verifier (includes staking).
+        # Tolerate "Already registered" — the verifier may score multiple workers
+        # in the same studio, but only needs to register once.
+        # The SDK raises a generic ContractError("Studio registration transaction
+        # failed") when the tx reverts, without including the revert reason.
+        # We also tolerate that generic error after the first successful registration.
+        try:
+            self.sdk.register_with_studio(
+                studio_address,
+                agent_id=self.agent_id,
+                role=_ROLE_VERIFIER,
+                stake_amount=VERIFIER_STAKE_WEI,
+            )
+            logger.info("sdk_client.verifier_registered", studio=studio_address)
+        except Exception as exc:
+            exc_str = str(exc)
+            if "Already registered" in exc_str or "registration transaction failed" in exc_str:
+                logger.debug("sdk_client.verifier_already_registered", studio=studio_address)
+            else:
+                raise
 
-        # Build data hash referencing the worker submission
-        data_hash: bytes = self.w3.keccak(text=worker_address.lower())
+        # Normalise data_hash to bytes for the SDK.
+        if data_hash is None:
+            data_hash_bytes: bytes = self.w3.keccak(text=worker_address.lower())
+        elif isinstance(data_hash, str):
+            data_hash_bytes = bytes.fromhex(data_hash.removeprefix("0x"))
+        else:
+            data_hash_bytes = data_hash
 
-        # submit_score_via_gateway returns a WorkflowStatus (dataclass)
+        # Use submit_score_via_gateway (DIRECT mode).
+        # DIRECT mode: simple scoring via submitScoreVectorForWorker.
+        # Requires worker_address.  The gateway handles the on-chain tx,
+        # confirmation, and registerValidator on RewardsDistributor.
+        #
+        # Gateway expects scores in basis points (0-10000) and divides by 100
+        # to get uint8 (0-100) for on-chain storage.  Our auditor returns
+        # scores in 0-100, so multiply by 100 here.
+        scores_bp = [s * 100 for s in scores]
         workflow_status = self.sdk.submit_score_via_gateway(
             studio_address=studio_address,
             epoch=1,
-            data_hash=data_hash,
-            scores=scores,
+            data_hash=data_hash_bytes,
+            scores=scores_bp,
+            worker_address=worker_address,
+            mode="direct",
             wait_for_completion=True,
         )
 
@@ -337,6 +368,53 @@ class ChaosOracleSDKClient:
             "sdk_client.submit_scores.done",
             studio=studio_address,
             worker=worker_address,
+            state=state_str,
+        )
+        return {"state": state_str, "id": workflow_status.id}
+
+    # ------------------------------------------------------------------
+    # Close epoch flow
+    # ------------------------------------------------------------------
+
+    async def close_epoch(
+        self,
+        studio_address: str,
+        epoch: int = 1,
+    ) -> dict[str, Any]:
+        """Close an epoch on the RewardsDistributor via the Gateway.
+
+        Triggers consensus finalisation and reward distribution.  This is
+        economically final and cannot be undone.
+
+        Parameters
+        ----------
+        studio_address:
+            The StudioProxy contract address.
+        epoch:
+            The epoch number to close (default 1 for sandbox).
+
+        Returns
+        -------
+        dict
+            Gateway workflow result (converted from WorkflowStatus).
+        """
+        logger.info(
+            "sdk_client.close_epoch.start",
+            studio=studio_address,
+            epoch=epoch,
+        )
+
+        workflow_status = self.sdk.close_epoch_via_gateway(
+            studio_address=studio_address,
+            epoch=epoch,
+            wait_for_completion=True,
+        )
+
+        state_str = workflow_status.state.value if hasattr(workflow_status.state, "value") else str(workflow_status.state)
+        logger.info(
+            "sdk_client.close_epoch.done",
+            studio=studio_address,
+            epoch=epoch,
             state=state_str,
         )
         return {"state": state_str, "id": workflow_status.id}
@@ -372,22 +450,25 @@ class ChaosOracleSDKClient:
             abi=STUDIO_PROXY_WITHDRAW_ABI,
         )
 
-        # Check if there is anything to withdraw
+        # Check if there is anything to withdraw.
+        # Use getWithdrawableBalance (the _withdrawable mapping) — this is
+        # what withdraw() actually checks.  getEscrowBalance is the deposit
+        # record and stays non-zero even after withdrawal.
         try:
-            balance = proxy.functions.getEscrowBalance(account.address).call()
+            balance = proxy.functions.getWithdrawableBalance(account.address).call()
             logger.info(
                 "sdk_client.withdraw.balance_check",
                 studio=studio_address,
-                escrow_balance_wei=balance,
+                withdrawable_wei=balance,
             )
             if balance == 0:
                 logger.info(
                     "sdk_client.withdraw.nothing_to_withdraw",
                     studio=studio_address,
                 )
-                return True  # Nothing to withdraw is not an error
+                return False  # Retry later — closeEpoch may not have been called yet
         except Exception:
-            # getEscrowBalance may not reflect _withdrawable; proceed anyway
+            # getWithdrawableBalance may not exist; proceed anyway
             logger.debug(
                 "sdk_client.withdraw.balance_check_skipped",
                 studio=studio_address,

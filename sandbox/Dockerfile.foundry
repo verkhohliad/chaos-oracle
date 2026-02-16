@@ -1,0 +1,15 @@
+FROM ghcr.io/foundry-rs/foundry:stable
+
+# Install jq + python3 for JSON parsing and bytecode patching in scripts
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends jq coreutils bc curl python3 && rm -rf /var/lib/apt/lists/*
+
+# Copy contracts source for forge create (deploy.sh)
+WORKDIR /app
+COPY contracts/src/ src/
+COPY contracts/lib/ lib/
+COPY contracts/foundry.toml foundry.toml
+
+# Copy sandbox scripts
+COPY sandbox/scripts/ scripts/
+RUN chmod +x scripts/*.sh

@@ -122,8 +122,13 @@ async def run(config: VerifierConfig) -> NoReturn:
     # Studios where we have already registered as a verifier.
     registered_studios: set[str] = set()
 
+    # Studios where we participated and should attempt withdrawal after settlement.
+    pending_withdrawal: set[str] = set()
+
     # Studios where we have already withdrawn stakes/rewards.
     withdrawn_studios: set[str] = set()
+    withdrawal_attempts: dict[str, int] = {}  # studio -> attempt count
+    MAX_WITHDRAWAL_ATTEMPTS = 12  # ~60s at 5s poll interval
 
     # -- Poll loop -----------------------------------------------------------
     logger.info("verifier.loop.start", poll_interval=config.poll_interval_seconds)
@@ -137,17 +142,9 @@ async def run(config: VerifierConfig) -> NoReturn:
                     # Fetch studio details to check if epoch is still open
                     details = registry.get_studio_details(studio_address)
                     if details.epoch_closed:
-                        # Attempt to withdraw stakes/rewards from settled studio
+                        # Defer withdrawal to the pending_withdrawal loop below
                         if studio_address not in withdrawn_studios:
-                            try:
-                                ok = await sdk_client.withdraw_from_studio(studio_address)
-                                if ok:
-                                    withdrawn_studios.add(studio_address)
-                                    logger.info("verifier.withdraw.done", studio=studio_address)
-                                else:
-                                    logger.warning("verifier.withdraw.reverted", studio=studio_address)
-                            except Exception:
-                                logger.exception("verifier.withdraw.error", studio=studio_address)
+                            pending_withdrawal.add(studio_address)
                         continue
 
                     # Only look at studios that have at least one worker submission
@@ -190,9 +187,11 @@ async def run(config: VerifierConfig) -> NoReturn:
                                 studio_address=studio_address,
                                 worker_address=submission.worker_address,
                                 scores=scores,
+                                data_hash=submission.data_hash,
                             )
 
                             scored_pairs.add(pair)
+                            pending_withdrawal.add(studio_address)
                             logger.info(
                                 "verifier.scores_submitted",
                                 studio=studio_address,
@@ -210,6 +209,44 @@ async def run(config: VerifierConfig) -> NoReturn:
 
                 except Exception:
                     logger.exception("verifier.studio_processing_error", studio=studio_address)
+
+            # -- Withdraw from settled studios ----------------------------------
+            # get_active_studios() only returns unsettled studios, so once a
+            # studio is settled the main loop above will never visit it.  We
+            # check our pending_withdrawal set independently.
+            for studio_addr in list(pending_withdrawal):
+                if studio_addr in withdrawn_studios:
+                    pending_withdrawal.discard(studio_addr)
+                    continue
+                try:
+                    if registry.is_studio_settled(studio_addr):
+                        ok = await sdk_client.withdraw_from_studio(studio_addr)
+                        if ok:
+                            withdrawn_studios.add(studio_addr)
+                            pending_withdrawal.discard(studio_addr)
+                            logger.info("verifier.withdraw.done", studio=studio_addr)
+                        else:
+                            # Withdrawable balance is 0 — closeEpoch may not have
+                            # run yet.  Retry up to MAX_WITHDRAWAL_ATTEMPTS then
+                            # give up.
+                            attempts = withdrawal_attempts.get(studio_addr, 0) + 1
+                            withdrawal_attempts[studio_addr] = attempts
+                            if attempts >= MAX_WITHDRAWAL_ATTEMPTS:
+                                logger.info(
+                                    "verifier.withdraw.gave_up",
+                                    studio=studio_addr,
+                                    attempts=attempts,
+                                )
+                                withdrawn_studios.add(studio_addr)
+                                pending_withdrawal.discard(studio_addr)
+                            else:
+                                logger.debug(
+                                    "verifier.withdraw.retry_later",
+                                    studio=studio_addr,
+                                    attempt=attempts,
+                                )
+                except Exception:
+                    logger.exception("verifier.withdraw.error", studio=studio_addr)
 
         except Exception:
             logger.exception("verifier.poll_cycle_error")

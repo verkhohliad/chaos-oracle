@@ -65,7 +65,7 @@ ChaosOracle is a **plug-and-play settlement layer** for prediction markets. Inst
 |                                                                       |
 |   - Tracks all pending markets                                        |
 |   - Aggregates events from all studios (for CRE to listen)           |
-|   - Only CRE can call createStudioForMarket() and closeStudioEpoch() |
+|   - Only CRE can call createStudioForMarket() and settleWithOutcome() |
 |                                                                       |
 +----------------------------------+------------------------------------+
                                    |
@@ -96,7 +96,7 @@ ChaosOracle is a **plug-and-play settlement layer** for prediction markets. Inst
 |   Workers:                                                            |
 |     - Stake tokens to participate                                     |
 |     - Research market outcome                                         |
-|     - Submit outcome + evidenceCID (Arweave link to reasoning)       |
+|     - Submit outcome + evidenceCID (IPFS/Arweave link to reasoning)  |
 |                                                                       |
 |   Verifiers:                                                          |
 |     - Stake tokens to participate                                     |
@@ -168,8 +168,7 @@ function onScoresSubmitted(uint256 totalSubmissions, uint256 totalScores) extern
 ### 3. Settlement Authorization
 
 ```
-PredictionMarket.setSettler()    <- Only CRE can call (via Registry)
-PredictionMarket.onSettlement()  <- Only the authorized Studio can call
+PredictionMarket.onSettlement()  <- Only the Registry can call (onlyChaosOracleRegistry modifier)
 Studio.closeEpoch()              <- Only CRE can call (via Registry)
 ```
 
@@ -183,15 +182,15 @@ The prediction market calls `registerForSettlement{value: reward}(marketId, ques
 
 ### Phase 2: Studio Creation (CRE Trigger 1 — Every 5 min Cron)
 
-CRE calls `getMarketsReadyForSettlement()` on the Registry. For each market past its deadline, CRE calls `createStudioForMarket(key, proof)`. The Registry creates a Studio (via StudioProxyFactory), funds it with the settlement reward, and calls `predictionMarket.setSettler()`. Emits `StudioCreated`.
+CRE calls `getMarketsReadyForSettlement()` on the Registry. For each market past its deadline, CRE calls `createStudioForMarket(key, proof)`. The Registry creates a Studio (via StudioProxyFactory) and funds it with the settlement reward. Emits `StudioCreated`.
 
 ### Phase 3: Worker Participation
 
-Worker agents discover the studio, call `registerAsWorker{value: stake}()`, then research the market question (web search + LLM analysis). They submit their outcome + evidence CID via `submitWork(outcome, evidenceCID)`.
+Worker agents discover the studio, call `registerAsWorker{value: stake}()`, then research the market question (web search + LLM analysis). They build an evidence package (outcome, confidence, sources, reasoning) and upload it to IPFS (sandbox) or Arweave (production). They then submit their outcome + evidence CID via `submitWork(outcome, evidenceCID)`.
 
 ### Phase 4: Verifier Scoring
 
-Verifier agents discover worker submissions, call `registerAsVerifier{value: stake}()`, fetch evidence from Arweave, audit it (LLM or heuristic), and submit scores via `submitScores(worker, [accuracy, evidenceQuality, sourceDiversity, reasoningDepth])`. Each score submission notifies the Registry via `onScoresSubmitted()`, which emits `StudioScoresSubmitted` for CRE.
+Verifier agents discover worker submissions, call `registerAsVerifier{value: stake}()`, fetch evidence from IPFS/Arweave, audit it (LLM or heuristic), and submit scores via `submitScores(worker, [accuracy, evidenceQuality, sourceDiversity, reasoningDepth])`. Each verifier scores **all** workers (e.g. 3 verifiers x 3 workers = 9 score submissions). Each score submission notifies the Registry via `onScoresSubmitted()`, which emits `StudioScoresSubmitted` for CRE.
 
 ### Phase 5: Settlement (CRE Trigger 2 — On Scores Submitted)
 
@@ -199,7 +198,7 @@ CRE checks `canClose()` on the studio. If enough workers and verifiers have part
 
 ### Phase 6: User Claims
 
-Users call `claimWinnings(marketId)` on the prediction market. The market checks the settled outcome and transfers winnings. Users can verify settlement by fetching evidence CIDs from Arweave to see the full AI reasoning chain.
+Users call `claimWinnings(marketId)` on the prediction market. The market checks the settled outcome and transfers winnings. Users can verify settlement by fetching evidence CIDs from IPFS/Arweave to see the full AI reasoning chain.
 
 ---
 
@@ -256,10 +255,7 @@ function closeEpoch() external; // onlyCRE via Registry
 
 ```solidity
 interface IChaosOracleSettleable {
-    // CRE sets which studio can settle this market
-    function setSettler(uint256 marketId, address settler) external;
-
-    // Studio calls this when consensus is reached
+    // Registry calls this when consensus is reached
     function onSettlement(uint256 marketId, uint8 outcome, bytes32 proofHash) external;
 }
 ```
@@ -338,7 +334,6 @@ contract YourPredictionMarket is IChaosOracleSettleable {
         string question;
         string[] options;
         uint256 deadline;
-        address settler;      // Set by CRE
         uint8 outcome;        // Set on settlement
         bool settled;
     }
@@ -361,7 +356,6 @@ contract YourPredictionMarket is IChaosOracleSettleable {
             question: question,
             options: options,
             deadline: deadline,
-            settler: address(0),
             outcome: 0,
             settled: false
         });
@@ -388,16 +382,10 @@ contract YourPredictionMarket is IChaosOracleSettleable {
 
     // ---- CHAOSORACLE INTERFACE (required) ----
 
-    function setSettler(uint256 marketId, address settler) external override {
-        require(msg.sender == chaosOracle.creForwarder(), "Only CRE");
-        require(markets[marketId].settler == address(0), "Already set");
-        markets[marketId].settler = settler;
-    }
-
     function onSettlement(
         uint256 marketId, uint8 outcome, bytes32 proofHash
     ) external override {
-        require(msg.sender == markets[marketId].settler, "Only settler");
+        require(msg.sender == address(chaosOracle), "Only registry");
         require(!markets[marketId].settled, "Already settled");
         markets[marketId].outcome = outcome;
         markets[marketId].settled = true;
@@ -563,14 +551,38 @@ def run_verifier(studio_address: str, data_hash, worker_address: str):
 
 | # | Action |
 |---|--------|
-| 20 | `cd demo && ./create_market.sh` — creates market + registers for settlement |
+| 20 | `cd sandbox && docker compose up --build` — runs full local sandbox |
 | 21 | `./place_bet.sh` — place bets on both sides |
 | 22 | Wait for market deadline to pass |
 | 23 | CRE Trigger 1 fires -> creates ChaosChain Studio automatically |
 | 24 | Worker agents discover studio -> research -> submit evidence |
 | 25 | Verifier agents audit evidence -> submit scores |
-| 26 | CRE Trigger 2/3 fires -> `closeEpoch()` -> consensus -> settlement |
+| 26 | CRE Trigger 2/3 fires -> `settleWithOutcome()` -> consensus -> settlement |
 | 27 | `./check_settlement.sh` — verify outcome |
+
+### Evidence Storage
+
+| Environment | Backend | Details |
+|-------------|---------|---------|
+| **Sandbox** | IPFS (Kubo) | Local node at `ipfs:5001`; gateway at `localhost:8080/ipfs/<CID>` |
+| **Production** | Arweave | Via Bundlr/Irys node; gateway at `arweave.net/<TX_ID>` |
+| **Unit tests** | SHA-256 stub | Deterministic hash, no network calls |
+
+Evidence packages follow a standard JSON schema:
+
+```json
+{
+  "version": "1.0",
+  "question": "Will ETH reach $10,000 by end of 2025?",
+  "outcome": 0,
+  "confidence": 0.85,
+  "sources": [{"url": "...", "title": "...", "snippet": "..."}],
+  "reasoning": "Based on market analysis...",
+  "timestamp": "2025-01-15T10:30:00Z"
+}
+```
+
+In the sandbox, workers also write a shared mapping file (`/shared/evidence_map.json`) that maps `dataHash -> evidenceCID` for cross-agent evidence resolution.
 
 ### Contract Verification (if deployed without --verify)
 
