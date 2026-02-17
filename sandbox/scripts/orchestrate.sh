@@ -225,12 +225,12 @@ TX_HASH=$(cast send \
     --json \
     "$MARKET" \
     "createMarket(string,uint256)(uint256)" \
-    "Will ETH reach \$10,000 by end of 2025?" \
+    "Will be rain on 15 Feb 2026 in Cascais, Portugal?" \
     "$DEADLINE" | jq -r '.transactionHash')
 
 echo ""
 log_kv "Market ID" "$MARKET_ID"
-log_kv "Question" "Will ETH reach \$10,000 by end of 2025?"
+log_kv "Question" "Will be rain on 15 Feb 2026 in Cascais, Portugal?"
 log_kv "Creator bet" "1.0 ETH"
 log_kv "  Settlement fee (10%)" "0.1 ETH -> studio escrow"
 log_kv "  Seed bet Yes (90%)" "0.9 ETH -> market pool"

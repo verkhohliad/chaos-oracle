@@ -178,7 +178,8 @@ services:
       - WORKER_PRIVATE_KEY=${WORKER1_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - POLL_INTERVAL_SECONDS=5
-      - OPENAI_MODEL=gpt-4.1-2025-04-14
+      - OPENAI_MODEL=gpt-5.2-2025-12-11
+      - REASONING_EFFORT=high
       - IPFS_API_URL=http://ipfs:5001
       - SHARED_DIR=/shared
     depends_on:
@@ -211,7 +212,8 @@ services:
       - WORKER_PRIVATE_KEY=${WORKER2_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - POLL_INTERVAL_SECONDS=5
-      - OPENAI_MODEL=gpt-4.1-2025-04-14
+      - OPENAI_MODEL=gpt-5-2025-08-07
+      - REASONING_EFFORT=high
       - IPFS_API_URL=http://ipfs:5001
       - SHARED_DIR=/shared
     depends_on:
@@ -246,6 +248,7 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - POLL_INTERVAL_SECONDS=5
       - OPENAI_MODEL=gpt-4.1-2025-04-14
+      - REASONING_EFFORT=high
       - IPFS_API_URL=http://ipfs:5001
       - SHARED_DIR=/shared
     depends_on:
@@ -280,7 +283,8 @@ services:
       - VERIFIER_PRIVATE_KEY=${VERIFIER1_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - POLL_INTERVAL_SECONDS=5
-      - OPENAI_MODEL=gpt-4.1-2025-04-14
+      - OPENAI_MODEL=gpt-5.2-2025-12-11
+      - REASONING_EFFORT=high
       - IPFS_API_URL=http://ipfs:5001
       - SHARED_DIR=/shared
     depends_on:
@@ -313,7 +317,8 @@ services:
       - VERIFIER_PRIVATE_KEY=${VERIFIER2_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - POLL_INTERVAL_SECONDS=5
-      - OPENAI_MODEL=gpt-4.1-2025-04-14
+      - OPENAI_MODEL=gpt-5-2025-08-07
+      - REASONING_EFFORT=high
       - IPFS_API_URL=http://ipfs:5001
       - SHARED_DIR=/shared
     depends_on:
@@ -347,6 +352,7 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - POLL_INTERVAL_SECONDS=5
       - OPENAI_MODEL=gpt-4.1-2025-04-14
+      - REASONING_EFFORT=high
       - IPFS_API_URL=http://ipfs:5001
       - SHARED_DIR=/shared
     depends_on:
