@@ -110,6 +110,7 @@ async def run(config: WorkerConfig) -> NoReturn:
     researcher = Researcher(
         openai_api_key=config.openai_api_key,
         openai_model=config.openai_model,
+        reasoning_effort=config.reasoning_effort,
     )
 
     evidence_builder = EvidenceBuilder()
@@ -163,6 +164,8 @@ async def run(config: WorkerConfig) -> NoReturn:
                         confidence=result.confidence,
                         sources=result.sources,
                         reasoning=result.reasoning,
+                        reasoning_summary=result.reasoning_summary,
+                        web_search_queries=result.web_search_queries,
                     )
 
                     # 4. Upload to Arweave

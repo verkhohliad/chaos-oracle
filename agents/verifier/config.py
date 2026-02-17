@@ -49,8 +49,15 @@ class VerifierConfig(BaseSettings):
         description="OpenAI API key used by the Auditor for LLM-based evaluation.",
     )
     openai_model: str = Field(
-        default="gpt-4o",
-        description="OpenAI model identifier for audit analysis.",
+        default="o4-mini",
+        description="OpenAI model identifier for audit analysis (e.g. o4-mini, o3, gpt-4o).",
+    )
+    reasoning_effort: str = Field(
+        default="high",
+        description=(
+            "Reasoning effort level for reasoning models: low/medium/high. "
+            "Controls depth of chain-of-thought. Ignored for non-reasoning models."
+        ),
     )
 
     # ---- Polling ----

@@ -1,21 +1,32 @@
 """
-Market question researcher that uses LLM analysis and web search to determine
-the most likely outcome for a prediction market question.
+Market question researcher that uses the OpenAI Responses API with
+**web search** and **reasoning** to determine the most likely outcome
+for a prediction market question.
 
-.. note::
-    The web search and LLM calls are placeholder implementations that
-    illustrate the expected interface.  Replace them with real API
-    integrations (e.g., OpenAI, Tavily, SerpAPI) before production use.
+Uses ``client.responses.create()`` with:
+- ``tools=[{"type": "web_search"}]`` for real-time web research
+- ``reasoning={"effort": ..., "summary": "detailed"}`` for chain-of-thought
+  (when using a reasoning model such as o4-mini or o3)
+
+The model autonomously decides what to search and how many queries to run.
 """
 
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from typing import Any
 
-import aiohttp
 import structlog
+
+from shared.openai_client import (
+    ParsedResponse,
+    create_async_client,
+    is_reasoning_model,
+    parse_response_output,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -28,6 +39,8 @@ class ResearchResult:
     confidence: float
     sources: list[dict[str, str]]
     reasoning: str
+    reasoning_summary: str = ""
+    web_search_queries: list[str] = field(default_factory=list)
 
 
 class Researcher:
@@ -36,23 +49,31 @@ class Researcher:
     Parameters
     ----------
     openai_api_key:
-        API key for OpenAI (or compatible) LLM service.
+        API key for the OpenAI Responses API.
     openai_model:
-        Model identifier (e.g. ``gpt-4o``).
+        Model identifier (e.g. ``o4-mini``, ``o3``, ``gpt-4o``).
+    reasoning_effort:
+        Reasoning effort level: ``"low"``, ``"medium"``, or ``"high"``.
+        Only used with reasoning models (o-series).
     """
 
     def __init__(
         self,
         openai_api_key: str = "",
-        openai_model: str = "gpt-4o",
+        openai_model: str = "gpt-5-2025-08-07",
+        reasoning_effort: str = "high",
     ) -> None:
         self._api_key = openai_api_key
         self._model = openai_model
+        self._reasoning_effort = reasoning_effort
+        self._client = create_async_client(openai_api_key) if openai_api_key else None
 
         logger.info(
             "researcher.initialized",
             has_api_key=bool(openai_api_key),
             model=openai_model,
+            reasoning_effort=reasoning_effort,
+            is_reasoning_model=is_reasoning_model(openai_model),
         )
 
     # ------------------------------------------------------------------
@@ -77,7 +98,7 @@ class Researcher:
         -------
         ResearchResult
             Contains the chosen outcome index, confidence score,
-            supporting sources, and free-form reasoning text.
+            supporting sources, reasoning, and reasoning summary.
         """
         logger.info(
             "researcher.research.start",
@@ -120,206 +141,191 @@ class Researcher:
                 )
                 # Fall through to normal research
 
-        # Step 1: Search the web for relevant information
-        sources = await self._web_search(question)
-
-        # Step 2: Analyze with LLM
-        analysis = await self._llm_analyze(question, options, sources)
+        # --- LLM + Web Search via Responses API ---
+        if self._client:
+            analysis = await self._call_responses_api(question, options)
+        else:
+            # Fallback: no API key configured
+            logger.warning(
+                "researcher.no_api_key",
+                msg="No OpenAI API key; returning placeholder.",
+            )
+            analysis = {
+                "outcome_index": 0,
+                "confidence": 0.5,
+                "reasoning": (
+                    f"Placeholder analysis for: '{question}'. "
+                    f"Options: {options}. "
+                    f"No LLM API key configured; defaulting to option 0."
+                ),
+                "sources": [],
+                "reasoning_summary": "",
+                "web_search_queries": [],
+            }
 
         result = ResearchResult(
             outcome_index=analysis["outcome_index"],
             confidence=analysis["confidence"],
-            sources=sources,
+            sources=analysis.get("sources", []),
             reasoning=analysis["reasoning"],
+            reasoning_summary=analysis.get("reasoning_summary", ""),
+            web_search_queries=analysis.get("web_search_queries", []),
         )
 
         logger.info(
             "researcher.research.done",
             outcome_index=result.outcome_index,
-            outcome_label=options[result.outcome_index] if result.outcome_index < len(options) else "?",
+            outcome_label=(
+                options[result.outcome_index]
+                if result.outcome_index < len(options)
+                else "?"
+            ),
             confidence=result.confidence,
             source_count=len(result.sources),
+            search_queries=result.web_search_queries,
         )
         return result
 
     # ------------------------------------------------------------------
-    # Web search (placeholder)
+    # Responses API call (web search + reasoning)
     # ------------------------------------------------------------------
 
-    async def _web_search(self, query: str) -> list[dict[str, str]]:
-        """Search the web for information relevant to *query*.
-
-        .. note::
-            **Placeholder implementation.**  In production, integrate with
-            a search API such as Tavily, SerpAPI, or Brave Search.
-
-        Returns
-        -------
-        list[dict]
-            Each entry has keys ``url``, ``title``, and ``snippet``.
-        """
-        logger.info("researcher.web_search.placeholder", query=query[:80])
-
-        # TODO: Replace with a real search API integration.
-        # Example with Tavily:
-        #
-        #   async with aiohttp.ClientSession() as session:
-        #       async with session.post(
-        #           "https://api.tavily.com/search",
-        #           json={"query": query, "api_key": self._tavily_key},
-        #       ) as resp:
-        #           data = await resp.json()
-        #           return [
-        #               {"url": r["url"], "title": r["title"], "snippet": r["content"]}
-        #               for r in data.get("results", [])
-        #           ]
-
-        return [
-            {
-                "url": "https://example.com/placeholder-source-1",
-                "title": "Placeholder source 1",
-                "snippet": "This is a placeholder search result. Replace with real search API.",
-            },
-            {
-                "url": "https://example.com/placeholder-source-2",
-                "title": "Placeholder source 2",
-                "snippet": "This is a placeholder search result. Replace with real search API.",
-            },
-        ]
-
-    # ------------------------------------------------------------------
-    # LLM analysis (placeholder)
-    # ------------------------------------------------------------------
-
-    async def _llm_analyze(
+    async def _call_responses_api(
         self,
         question: str,
         options: list[str],
-        sources: list[dict[str, str]],
     ) -> dict[str, Any]:
-        """Use an LLM to analyze the question and sources, selecting the best outcome.
+        """Call the OpenAI Responses API with web search and reasoning.
 
-        .. note::
-            **Placeholder implementation.**  In production, send a
-            structured prompt to an LLM API (OpenAI, Anthropic, etc.)
-            requesting a JSON response with ``outcome_index``,
-            ``confidence``, and ``reasoning``.
-
-        Returns
-        -------
-        dict
-            Keys: ``outcome_index`` (int), ``confidence`` (float 0-1),
-            ``reasoning`` (str).
-        """
-        if self._api_key:
-            return await self._call_openai(question, options, sources)
-
-        # Fallback: deterministic placeholder that always picks the first option.
-        logger.warning(
-            "researcher.llm_analyze.placeholder",
-            msg="No API key configured; returning default outcome 0.",
-        )
-        return {
-            "outcome_index": 0,
-            "confidence": 0.5,
-            "reasoning": (
-                f"Placeholder analysis for: '{question}'. "
-                f"Options: {options}. "
-                f"No LLM API key configured; defaulting to option 0. "
-                f"Sources consulted: {len(sources)}."
-            ),
-        }
-
-    async def _call_openai(
-        self,
-        question: str,
-        options: list[str],
-        sources: list[dict[str, str]],
-    ) -> dict[str, Any]:
-        """Call the OpenAI Chat Completions API for analysis.
-
-        Sends a structured prompt and expects a JSON response from the model.
+        A single API call that combines:
+        - **Web search**: the model autonomously searches for relevant info
+        - **Reasoning**: chain-of-thought with accessible summary
+        - **Structured output**: JSON with outcome, confidence, reasoning
         """
         options_text = "\n".join(f"  {i}: {opt}" for i, opt in enumerate(options))
-        sources_text = "\n".join(
-            f"  - [{s.get('title', 'N/A')}]({s.get('url', '')}): {s.get('snippet', '')}"
-            for s in sources
+
+        prompt = (
+            "You are a prediction market research analyst. Your task is to "
+            "determine the most likely outcome for the following market question.\n\n"
+            "INSTRUCTIONS:\n"
+            "1. Search the web thoroughly for the most recent and relevant "
+            "information about this topic.\n"
+            "2. Use multiple search queries to cross-reference facts from "
+            "different angles.\n"
+            "3. Prioritize authoritative, primary sources (official "
+            "announcements, reputable news outlets, government data, "
+            "academic publications).\n"
+            "4. After gathering evidence, select the most likely outcome.\n"
+            "5. Be concise and factual in your reasoning. No filler, no "
+            "hedging language.\n\n"
+            f"QUESTION: {question}\n\n"
+            f"OPTIONS:\n{options_text}\n\n"
+            "Respond with ONLY valid JSON matching this exact schema:\n"
+            '{"outcome_index": <int>, "confidence": <float 0.0-1.0>, '
+            '"reasoning": "<concise factual analysis>"}'
         )
 
-        system_prompt = (
-            "You are a prediction market research analyst. Given a market question, "
-            "possible outcomes, and web search results, determine the most likely "
-            "outcome. Respond ONLY with valid JSON matching this schema:\n"
-            '{"outcome_index": <int>, "confidence": <float 0-1>, "reasoning": "<string>"}'
-        )
-        user_prompt = (
-            f"Question: {question}\n\n"
-            f"Options:\n{options_text}\n\n"
-            f"Sources:\n{sources_text}\n\n"
-            "Analyze the evidence and select the most likely outcome."
-        )
-
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-        payload = {
+        kwargs: dict[str, Any] = {
             "model": self._model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 1,
-            "response_format": {"type": "json_object"},
+            "input": prompt,
+            "tools": [{"type": "web_search"}],
         }
+
+        if is_reasoning_model(self._model):
+            kwargs["reasoning"] = {
+                "effort": self._reasoning_effort,
+                "summary": "detailed",
+            }
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=60),
-                ) as resp:
-                    if resp.status != 200:
-                        body = await resp.text()
-                        logger.error(
-                            "researcher.openai.error",
-                            status=resp.status,
-                            body=body[:500],
-                        )
-                        raise RuntimeError(f"OpenAI API error: {resp.status}")
+            response = await self._client.responses.create(**kwargs)  # type: ignore[union-attr]
+            parsed: ParsedResponse = parse_response_output(response)
 
-                    data = await resp.json()
-                    content = data["choices"][0]["message"]["content"]
+            # Attempt to parse structured JSON from the response text
+            try:
+                data = json.loads(parsed.text)
+            except json.JSONDecodeError:
+                data = self._extract_json_from_text(parsed.text)
 
-                    import json
-                    result = json.loads(content)
+            outcome_index = int(data.get("outcome_index", 0))
+            confidence = float(data.get("confidence", 0.5))
+            reasoning_text = str(data.get("reasoning", ""))
 
-                    # Validate expected keys
-                    outcome_index = int(result.get("outcome_index", 0))
-                    confidence = float(result.get("confidence", 0.5))
-                    reasoning = str(result.get("reasoning", ""))
+            # Clamp to valid ranges
+            outcome_index = max(0, min(outcome_index, len(options) - 1))
+            confidence = max(0.0, min(confidence, 1.0))
 
-                    # Clamp to valid range
-                    outcome_index = max(0, min(outcome_index, len(options) - 1))
-                    confidence = max(0.0, min(confidence, 1.0))
+            # Build sources from web citations
+            sources = [
+                {
+                    "url": c["url"],
+                    "title": c.get("title", ""),
+                    "snippet": "",
+                }
+                for c in parsed.web_citations
+            ]
 
-                    logger.info(
-                        "researcher.openai.success",
-                        outcome_index=outcome_index,
-                        confidence=confidence,
-                    )
-                    return {
-                        "outcome_index": outcome_index,
-                        "confidence": confidence,
-                        "reasoning": reasoning,
-                    }
+            reasoning_summary = "\n".join(parsed.reasoning_summary)
+
+            logger.info(
+                "researcher.responses_api.success",
+                outcome_index=outcome_index,
+                confidence=confidence,
+                source_count=len(sources),
+                search_query_count=len(parsed.web_search_queries),
+            )
+
+            return {
+                "outcome_index": outcome_index,
+                "confidence": confidence,
+                "reasoning": reasoning_text,
+                "sources": sources,
+                "reasoning_summary": reasoning_summary,
+                "web_search_queries": parsed.web_search_queries,
+            }
+
         except Exception:
-            logger.exception("researcher.openai.call_failed")
-            # Graceful fallback
+            logger.exception("researcher.responses_api.call_failed")
             return {
                 "outcome_index": 0,
                 "confidence": 0.3,
-                "reasoning": f"LLM call failed; fallback to option 0 for '{question}'.",
+                "reasoning": f"API call failed; fallback to option 0 for '{question}'.",
+                "sources": [],
+                "reasoning_summary": "",
+                "web_search_queries": [],
             }
+
+    # ------------------------------------------------------------------
+    # JSON extraction helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_json_from_text(text: str) -> dict[str, Any]:
+        """Extract JSON from text that may contain markdown fences.
+
+        Tries in order:
+        1. JSON inside ```json ... ``` fences
+        2. Any JSON object containing ``outcome_index``
+        3. Fallback defaults
+        """
+        # Try markdown-fenced JSON
+        match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        # Try to find a bare JSON object with expected key
+        match = re.search(r'\{[^{}]*"outcome_index"\s*:[^{}]*\}', text)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                pass
+
+        logger.warning(
+            "researcher.json_extraction_failed",
+            raw_text=text[:300],
+        )
+        return {"outcome_index": 0, "confidence": 0.3, "reasoning": text[:500]}

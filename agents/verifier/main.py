@@ -107,6 +107,7 @@ async def run(config: VerifierConfig) -> NoReturn:
     auditor = Auditor(
         openai_api_key=config.openai_api_key,
         openai_model=config.openai_model,
+        reasoning_effort=config.reasoning_effort,
     )
 
     arweave = ArweaveClient()

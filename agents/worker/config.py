@@ -49,8 +49,15 @@ class WorkerConfig(BaseSettings):
         description="OpenAI API key used by the Researcher for LLM-based analysis.",
     )
     openai_model: str = Field(
-        default="gpt-4o",
-        description="OpenAI model identifier for research analysis.",
+        default="gpt-5-2025-08-07",
+        description="OpenAI model identifier for research analysis (e.g. o4-mini, o3, gpt-4o).",
+    )
+    reasoning_effort: str = Field(
+        default="high",
+        description=(
+            "Reasoning effort level for reasoning models: low/medium/high. "
+            "Controls depth of chain-of-thought. Ignored for non-reasoning models."
+        ),
     )
 
     # ---- Polling ----
