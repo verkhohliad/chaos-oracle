@@ -225,12 +225,12 @@ TX_HASH=$(cast send \
     --json \
     "$MARKET" \
     "createMarket(string,uint256)(uint256)" \
-    "Will be rain on 15 Feb 2026 in Cascais, Portugal?" \
+    "Will Elon Musk post something about DOGE coin in X on 15 Feb 2026?" \
     "$DEADLINE" | jq -r '.transactionHash')
 
 echo ""
 log_kv "Market ID" "$MARKET_ID"
-log_kv "Question" "Will be rain on 15 Feb 2026 in Cascais, Portugal?"
+log_kv "Question" "Will Elon Musk post something about DOGE coin in X on 15 Feb 2026?"
 log_kv "Creator bet" "1.0 ETH"
 log_kv "  Settlement fee (10%)" "0.1 ETH -> studio escrow"
 log_kv "  Seed bet Yes (90%)" "0.9 ETH -> market pool"
@@ -423,10 +423,13 @@ DATA_HASHES_JSON=$(echo "$WORK_LOGS" | jq -r '.[].topics[2]' 2>/dev/null || echo
 
 # Build a JSON summary of all workers' evidence for use in Phase 5b and Phase 10
 # This avoids the subshell issue with piped while loops
+# Write JSON to temp files to avoid control character issues in heredoc interpolation
+WORK_LOGS_FILE=$(mktemp)
+echo "$WORK_LOGS" > "$WORK_LOGS_FILE"
 WORKER_EVIDENCE_JSON=$(python3 -c "
 import json, subprocess, sys, os
 
-work_logs = json.loads('''$(echo "$WORK_LOGS")''')
+work_logs = json.load(open('$WORK_LOGS_FILE'))
 evidence_map_file = '$EVIDENCE_MAP_FILE'
 studio = '$STUDIO'
 rpc_url = '$RPC_URL'
@@ -568,6 +571,11 @@ for w in data:
     print(f\"        Tx:           http://localhost:5100/tx/{w['tx_hash']}\")
     print()
 " 2>/dev/null || echo "    (failed to decode worker submissions)"
+rm -f "$WORK_LOGS_FILE"
+
+# Write reusable JSON to temp files for Phase 5b and Phase 10
+WORKER_EVIDENCE_FILE=$(mktemp)
+echo "$WORKER_EVIDENCE_JSON" > "$WORKER_EVIDENCE_FILE"
 
 # ═══════════════════════════════════════════════════════════════════
 # Phase 5b: Wait for Verifier Scores
@@ -618,11 +626,13 @@ echo "    Verifier Scores ($ACTUAL_SCORE_COUNT total: 3 verifiers x 3 workers):"
 log_divider
 
 # Use python to group scores by worker, decode, compute averages, and display matrix
+SCORE_LOGS_FILE=$(mktemp)
+echo "$SCORE_LOGS" > "$SCORE_LOGS_FILE"
 python3 -c "
 import json, subprocess, sys
 
-score_logs = json.loads('''$(echo "$SCORE_LOGS")''')
-worker_evidence = json.loads('''$(echo "$WORKER_EVIDENCE_JSON")''')
+score_logs = json.load(open('$SCORE_LOGS_FILE'))
+worker_evidence = json.load(open('$WORKER_EVIDENCE_FILE'))
 rpc_url = '$RPC_URL'
 
 # Build label maps
@@ -647,19 +657,22 @@ def decode_scores(hex_data):
         length_hex = hex_data[offset:offset+64]
         byte_length = int(length_hex, 16)
         raw_bytes = hex_data[offset+64:offset+64+byte_length*2]
-        # Try ABI-encoded uint8[5] (each in 32-byte slot)
+        # Try ABI-encoded uint8[] (each value in a 32-byte slot)
+        num_slots = byte_length // 32
         scores = []
-        for i in range(min(5, byte_length // 32)):
-            val = int(raw_bytes[i*64:(i+1)*64], 16)
-            scores.append(val)
-        # Fallback: packed bytes
-        if len(scores) < 4 and byte_length <= 32:
+        if num_slots > 0:
+            for i in range(num_slots):
+                val = int(raw_bytes[i*64:(i+1)*64], 16)
+                scores.append(val)
+        # Fallback: packed bytes (if fewer than 2 slots but some bytes)
+        if len(scores) < 2 and byte_length > 0 and byte_length <= 32:
             scores = []
-            for i in range(min(5, byte_length)):
+            for i in range(byte_length):
                 val = int(raw_bytes[i*2:(i+1)*2], 16)
                 scores.append(val)
         return scores
-    except:
+    except Exception as e:
+        print(f'      (decode error: {e})', file=sys.stderr)
         return []
 
 # Build worker outcome map from evidence
@@ -711,9 +724,7 @@ for log in score_logs:
         'tx_hash': tx_hash,
     })
 
-# Display matrix
-score_labels = ['accuracy', 'quality', 'diversity', 'depth']
-
+# Display matrix (dynamic number of score dimensions)
 for w in worker_evidence:
     addr = w['worker_addr'].lower()
     label = labels.get(addr, 'unknown')
@@ -739,24 +750,29 @@ for w in worker_evidence:
         s = entry['scores']
         all_scores.append(s)
         scores_str = str(s)
-        if len(s) >= 4:
-            detail = f'  (accuracy={s[0]}, quality={s[1]}, diversity={s[2]}, depth={s[3]})'
+        # Build detail string dynamically for however many scores exist
+        if s:
+            parts = [f's{i}={v}' for i, v in enumerate(s)]
+            detail = '  (' + ', '.join(parts) + ')'
         else:
             detail = ''
         print(f'      {vlabel:12s}: {scores_str}{detail}')
         print(f'                   Tx: http://localhost:5100/tx/{entry[\"tx_hash\"]}')
 
-    # Compute average
-    if all_scores and all(len(s) >= 4 for s in all_scores):
-        n = len(all_scores)
-        avg = [sum(s[i] for s in all_scores) // n for i in range(min(4, len(all_scores[0])))]
-        print(f'      {\"Average\":12s}: {avg}')
+    # Compute average across all dimensions dynamically
+    if all_scores:
+        min_len = min(len(s) for s in all_scores)
+        if min_len > 0:
+            n = len(all_scores)
+            avg = [sum(s[i] for s in all_scores) // n for i in range(min_len)]
+            print(f'      {\"Average\":12s}: {avg}')
 
     if not entries:
         print(f'      (no scores yet)')
 
 print()
-" 2>/dev/null || echo "    (failed to decode score matrix)"
+" 2>&1 || echo "    (failed to decode score matrix)"
+rm -f "$SCORE_LOGS_FILE"
 
 # ═══════════════════════════════════════════════════════════════════
 # Phase 6: Economics Breakdown
@@ -1095,11 +1111,13 @@ echo "    Active studios after settlement: $ACTIVE_STUDIOS"
 echo ""
 
 # Use python for the complete balance sheet with slashing detection and reward verification
+FR_LOGS_FILE=$(mktemp)
+echo "$FR_LOGS" > "$FR_LOGS_FILE"
 python3 -c "
 import json, sys
 
-fr_logs = json.loads('''$(echo "$FR_LOGS")''')
-worker_evidence = json.loads('''$(echo "$WORKER_EVIDENCE_JSON")''')
+fr_logs = json.load(open('$FR_LOGS_FILE'))
+worker_evidence = json.load(open('$WORKER_EVIDENCE_FILE'))
 
 # Agent addresses and labels
 workers = [
@@ -1109,8 +1127,15 @@ verifiers = [
 $(for i in 0 1 2; do echo "    ('${ALL_VERIFIERS[$i]}', '${VERIFIER_LABELS[$i]}'),"; done)
 ]
 
-winning_outcome = $WINNING_OUTCOME
-studio_remaining_wei = int('$(echo "$STUDIO_REMAINING_WEI" | awk "{print \$1}")')
+try:
+    winning_outcome = int('$WINNING_OUTCOME')
+except (ValueError, TypeError):
+    winning_outcome = 0
+try:
+    _raw_wei = '$(echo "$STUDIO_REMAINING_WEI" | awk "{print \$1}")'
+    studio_remaining_wei = int(_raw_wei.strip().split()[0]) if _raw_wei.strip() else 0
+except (ValueError, TypeError):
+    studio_remaining_wei = 0
 rpc_url = '$RPC_URL'
 studio = '$STUDIO'
 
@@ -1244,7 +1269,8 @@ if slashed_agents:
         if sa.get('evidence_cid'):
             print(f'      Evidence: http://localhost:8080/ipfs/{sa[\"evidence_cid\"]}')
         print()
-" 2>/dev/null || echo "    (failed to generate balance sheet)"
+" 2>&1 || echo "    (failed to generate balance sheet)"
+rm -f "$FR_LOGS_FILE" "$WORKER_EVIDENCE_FILE"
 
 echo ""
 echo "    Links:"
