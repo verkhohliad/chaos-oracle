@@ -176,11 +176,24 @@ async def run(config: VerifierConfig) -> NoReturn:
                                 submission.evidence_cid,
                             )
 
-                            # 2. Audit the evidence
+                            logger.info(
+                                "verifier.evidence_fetched",
+                                studio=studio_address,
+                                worker=submission.worker_address,
+                                evidence_cid=submission.evidence_cid,
+                                worker_outcome=evidence_package.get("outcome"),
+                                worker_confidence=evidence_package.get("confidence"),
+                                worker_source_count=len(evidence_package.get("sources", [])),
+                                worker_reasoning_preview=evidence_package.get("reasoning", "")[:200],
+                                worker_search_query_count=len(evidence_package.get("web_search_queries", [])),
+                            )
+
+                            # 2. Audit the evidence (with on-chain scoring criteria)
                             scores = await auditor.audit(
                                 evidence_package=evidence_package,
                                 question=details.question,
                                 options=details.options,
+                                scoring_criteria=details.scoring_criteria,
                             )
 
                             # 3. Submit scores on-chain
@@ -198,6 +211,13 @@ async def run(config: VerifierConfig) -> NoReturn:
                                 studio=studio_address,
                                 worker=submission.worker_address,
                                 scores=scores,
+                                dimension_names=[
+                                    c.name for c in details.scoring_criteria
+                                ] if details.scoring_criteria else [],
+                                dimension_scores=dict(zip(
+                                    [c.name for c in details.scoring_criteria],
+                                    scores,
+                                )) if details.scoring_criteria else {},
                             )
 
                         except Exception:

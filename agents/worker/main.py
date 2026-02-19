@@ -136,6 +136,7 @@ async def run(config: WorkerConfig) -> NoReturn:
     while True:
         try:
             studios = registry.get_active_studios()
+            studios.reverse()  # Newest studio first — matches what orchestrator polls
 
             for studio_address in studios:
                 if studio_address in participated_studios:
@@ -170,7 +171,13 @@ async def run(config: WorkerConfig) -> NoReturn:
 
                     # 4. Upload to Arweave
                     evidence_cid = await arweave.upload_evidence(evidence_package)
-                    logger.info("worker.evidence_uploaded", cid=evidence_cid)
+                    logger.info(
+                        "worker.evidence_uploaded",
+                        cid=evidence_cid,
+                        source_count=len(evidence_package.get("sources", [])),
+                        search_query_count=len(evidence_package.get("web_search_queries", [])),
+                        reasoning_summary_preview=evidence_package.get("reasoning_summary", "")[:200],
+                    )
 
                     # 5. Submit work on-chain
                     await sdk_client.submit_work(

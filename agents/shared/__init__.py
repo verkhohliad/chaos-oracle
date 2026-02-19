@@ -15,7 +15,7 @@ from shared.constants import (
     VERIFIER_STAKE_WEI,
     WORKER_STAKE_WEI,
 )
-from shared.registry_reader import RegistryReader, StudioDetails, WorkerSubmission
+from shared.registry_reader import RegistryReader, ScoringDimension, StudioDetails, WorkerSubmission
 
 from shared.sdk_client import ChaosOracleSDKClient
 

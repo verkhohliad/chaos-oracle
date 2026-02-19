@@ -9,6 +9,8 @@ Uses ``client.responses.create()`` with:
   (when using a reasoning model such as o4-mini or o3)
 
 The model autonomously decides what to search and how many queries to run.
+The enhanced prompt requests structured output including key sources with
+relevance context, search queries used, and contrary evidence analysis.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from shared.openai_client import (
     ParsedResponse,
     create_async_client,
     is_reasoning_model,
-    parse_response_output,
+    stream_responses_with_logging,
 )
 
 logger = structlog.get_logger(__name__)
@@ -200,29 +202,46 @@ class Researcher:
         A single API call that combines:
         - **Web search**: the model autonomously searches for relevant info
         - **Reasoning**: chain-of-thought with accessible summary
-        - **Structured output**: JSON with outcome, confidence, reasoning
+        - **Structured output**: JSON with outcome, confidence, reasoning,
+          key sources, search queries, and contrary evidence
         """
         options_text = "\n".join(f"  {i}: {opt}" for i, opt in enumerate(options))
 
         prompt = (
-            "You are a prediction market research analyst. Your task is to "
-            "determine the most likely outcome for the following market question.\n\n"
+            "You are an expert prediction market research analyst. Your task "
+            "is to determine the most likely outcome for the following market "
+            "question using thorough web research.\n\n"
             "INSTRUCTIONS:\n"
             "1. Search the web thoroughly for the most recent and relevant "
             "information about this topic.\n"
             "2. Use multiple search queries to cross-reference facts from "
-            "different angles.\n"
-            "3. Prioritize authoritative, primary sources (official "
+            "different angles (direct query, news, data sources, contrary "
+            "evidence).\n"
+            "3. Prioritize authoritative, primary sources: official "
             "announcements, reputable news outlets, government data, "
-            "academic publications).\n"
-            "4. After gathering evidence, select the most likely outcome.\n"
-            "5. Be concise and factual in your reasoning. No filler, no "
-            "hedging language.\n\n"
+            "academic publications.\n"
+            "4. Look for the most recent information — prediction markets "
+            "are time-sensitive.\n"
+            "5. Search for contrary evidence to test your hypothesis.\n"
+            "6. After gathering evidence, select the most likely outcome.\n"
+            "7. Be concise and factual in your reasoning. Reference specific "
+            "sources and data points. No filler, no hedging language.\n\n"
             f"QUESTION: {question}\n\n"
             f"OPTIONS:\n{options_text}\n\n"
             "Respond with ONLY valid JSON matching this exact schema:\n"
-            '{"outcome_index": <int>, "confidence": <float 0.0-1.0>, '
-            '"reasoning": "<concise factual analysis>"}'
+            "{\n"
+            '  "outcome_index": <int, 0-based index of the chosen option>,\n'
+            '  "confidence": <float 0.0-1.0>,\n'
+            '  "reasoning": "<comprehensive factual analysis supporting your '
+            'choice, referencing specific sources and data points>",\n'
+            '  "key_sources": [\n'
+            '    {"url": "<url>", "title": "<source title>", '
+            '"relevance": "<how this source supports the conclusion>"}\n'
+            "  ],\n"
+            '  "search_queries_used": ["<query1>", "<query2>", ...],\n'
+            '  "contrary_evidence": "<summary of any evidence against the '
+            'chosen outcome, or empty string if none found>"\n'
+            "}"
         )
 
         kwargs: dict[str, Any] = {
@@ -238,8 +257,9 @@ class Researcher:
             }
 
         try:
-            response = await self._client.responses.create(**kwargs)  # type: ignore[union-attr]
-            parsed: ParsedResponse = parse_response_output(response)
+            parsed: ParsedResponse = await stream_responses_with_logging(
+                self._client, caller="researcher", **kwargs,
+            )
 
             # Attempt to parse structured JSON from the response text
             try:
@@ -251,19 +271,47 @@ class Researcher:
             confidence = float(data.get("confidence", 0.5))
             reasoning_text = str(data.get("reasoning", ""))
 
+            # Append contrary evidence to reasoning if present
+            contrary = data.get("contrary_evidence", "")
+            if contrary:
+                reasoning_text += f"\n\nContrary evidence considered: {contrary}"
+
             # Clamp to valid ranges
             outcome_index = max(0, min(outcome_index, len(options) - 1))
             confidence = max(0.0, min(confidence, 1.0))
 
-            # Build sources from web citations
-            sources = [
-                {
-                    "url": c["url"],
-                    "title": c.get("title", ""),
-                    "snippet": "",
-                }
-                for c in parsed.web_citations
-            ]
+            # Build sources: merge web_citations (API metadata — actual URLs
+            # visited) + key_sources (model-reported, with relevance context)
+            sources: list[dict[str, str]] = []
+            seen_urls: set[str] = set()
+
+            # Primary: web citations from the Responses API
+            for c in parsed.web_citations:
+                url = c.get("url", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    sources.append({
+                        "url": url,
+                        "title": c.get("title", ""),
+                        "snippet": "",
+                    })
+
+            # Secondary: model-reported key sources (include relevance)
+            for ks in data.get("key_sources", []):
+                url = ks.get("url", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    sources.append({
+                        "url": url,
+                        "title": ks.get("title", ""),
+                        "snippet": ks.get("relevance", ""),
+                    })
+
+            # Merge search queries from API metadata + model self-report
+            search_queries = list(parsed.web_search_queries)
+            for q in data.get("search_queries_used", []):
+                if q and q not in search_queries:
+                    search_queries.append(q)
 
             reasoning_summary = "\n".join(parsed.reasoning_summary)
 
@@ -272,7 +320,8 @@ class Researcher:
                 outcome_index=outcome_index,
                 confidence=confidence,
                 source_count=len(sources),
-                search_query_count=len(parsed.web_search_queries),
+                search_query_count=len(search_queries),
+                has_contrary_evidence=bool(contrary),
             )
 
             return {
@@ -281,7 +330,7 @@ class Researcher:
                 "reasoning": reasoning_text,
                 "sources": sources,
                 "reasoning_summary": reasoning_summary,
-                "web_search_queries": parsed.web_search_queries,
+                "web_search_queries": search_queries,
             }
 
         except Exception:
@@ -300,29 +349,81 @@ class Researcher:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _find_json_objects(text: str) -> list[dict[str, Any]]:
+        """Find all valid JSON objects in text using balanced-brace scanning.
+
+        Handles nested objects and arrays (e.g. ``key_sources`` array),
+        unlike simple ``\\{[^{}]*\\}`` regex.
+        """
+        results: list[dict[str, Any]] = []
+        i = 0
+        while i < len(text):
+            if text[i] == "{":
+                depth = 0
+                start = i
+                in_string = False
+                escape_next = False
+                for j in range(i, len(text)):
+                    c = text[j]
+                    if escape_next:
+                        escape_next = False
+                        continue
+                    if c == "\\":
+                        escape_next = True
+                        continue
+                    if c == '"' and not escape_next:
+                        in_string = not in_string
+                    if not in_string:
+                        if c == "{":
+                            depth += 1
+                        elif c == "}":
+                            depth -= 1
+                        if depth == 0:
+                            candidate = text[start : j + 1]
+                            try:
+                                obj = json.loads(candidate)
+                                if isinstance(obj, dict):
+                                    results.append(obj)
+                            except json.JSONDecodeError:
+                                pass
+                            i = j + 1
+                            break
+                else:
+                    i += 1
+            else:
+                i += 1
+        return results
+
+    @staticmethod
     def _extract_json_from_text(text: str) -> dict[str, Any]:
-        """Extract JSON from text that may contain markdown fences.
+        """Extract JSON from text that may contain markdown fences or prose.
 
         Tries in order:
-        1. JSON inside ```json ... ``` fences
-        2. Any JSON object containing ``outcome_index``
+        1. JSON inside ```json ... ``` fences (balanced-brace aware)
+        2. All balanced JSON objects — prefer one with ``outcome_index``
         3. Fallback defaults
         """
-        # Try markdown-fenced JSON
-        match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(1))
-            except json.JSONDecodeError:
-                pass
+        # Try markdown-fenced JSON (balanced-brace scan on fenced content)
+        fence_match = re.search(r"```(?:json)?\s*(\{.+)\s*```", text, re.DOTALL)
+        if fence_match:
+            fenced = fence_match.group(1)
+            objs = Researcher._find_json_objects(fenced)
+            if objs:
+                # Prefer object with outcome_index
+                for obj in objs:
+                    if "outcome_index" in obj:
+                        return obj
+                return objs[0]
 
-        # Try to find a bare JSON object with expected key
-        match = re.search(r'\{[^{}]*"outcome_index"\s*:[^{}]*\}', text)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except json.JSONDecodeError:
-                pass
+        # Scan full text for JSON objects
+        objs = Researcher._find_json_objects(text)
+        if objs:
+            # Prefer object with outcome_index key
+            for obj in objs:
+                if "outcome_index" in obj:
+                    return obj
+            # Fall back to the largest object
+            return max(objs, key=lambda o: len(o))
 
         logger.warning(
             "researcher.json_extraction_failed",

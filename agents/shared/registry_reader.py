@@ -106,6 +106,14 @@ def _get_deploy_block() -> int:
 
 
 @dataclass(frozen=True)
+class ScoringDimension:
+    """A single scoring dimension from the studio's logic module."""
+
+    name: str
+    weight: int  # 100 = 1.0x baseline
+
+
+@dataclass(frozen=True)
 class StudioDetails:
     """Read-only snapshot of a studio's on-chain state."""
 
@@ -114,6 +122,7 @@ class StudioDetails:
     options: list[str]
     epoch_closed: bool
     worker_count: int = 0
+    scoring_criteria: list[ScoringDimension] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -249,7 +258,48 @@ class RegistryReader:
             return False
 
     # ------------------------------------------------------------------
-    # Studio reads (via LogicModule delegatecall — question/options only)
+    # Scoring criteria (via LogicModule delegatecall)
+    # ------------------------------------------------------------------
+
+    def get_scoring_criteria(self, studio_address: str) -> list[ScoringDimension]:
+        """Read scoring criteria from the studio's logic module.
+
+        Calls ``getScoringCriteria()`` on the StudioProxy (delegated to the
+        LogicModule) to discover dimension names and weights.
+
+        Returns
+        -------
+        list[ScoringDimension]
+            Scoring dimensions with names and weights.  Falls back to 4
+            default prediction-specific dimensions if the call fails.
+        """
+        studio = self._studio_logic_contract(studio_address)
+        try:
+            names, weights = studio.functions.getScoringCriteria().call()
+            criteria = [
+                ScoringDimension(name=n, weight=int(w))
+                for n, w in zip(names, weights)
+            ]
+            logger.info(
+                "registry_reader.scoring_criteria",
+                studio=studio_address,
+                dimensions=[(c.name, c.weight) for c in criteria],
+            )
+            return criteria
+        except Exception:
+            logger.warning(
+                "registry_reader.scoring_criteria_fallback",
+                studio=studio_address,
+            )
+            return [
+                ScoringDimension(name="Accuracy", weight=200),
+                ScoringDimension(name="Evidence Quality", weight=150),
+                ScoringDimension(name="Source Diversity", weight=120),
+                ScoringDimension(name="Reasoning Depth", weight=130),
+            ]
+
+    # ------------------------------------------------------------------
+    # Studio reads (via LogicModule delegatecall — question/options)
     # ------------------------------------------------------------------
 
     def get_studio_details(self, studio_address: str) -> StudioDetails:
@@ -290,12 +340,16 @@ class RegistryReader:
                 studio=studio_address,
             )
 
+        # Read scoring criteria from the logic module.
+        scoring_criteria = self.get_scoring_criteria(studio_address)
+
         details = StudioDetails(
             address=studio_address,
             question=question,
             options=options,
             epoch_closed=epoch_closed,
             worker_count=worker_count,
+            scoring_criteria=scoring_criteria,
         )
 
         logger.info(

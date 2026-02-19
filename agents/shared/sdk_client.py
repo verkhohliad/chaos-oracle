@@ -224,14 +224,25 @@ class ChaosOracleSDKClient:
         if self.agent_id is None:
             raise RuntimeError("Agent not registered — call auto_register() first.")
 
-        # Register with studio as worker (includes staking)
-        self.sdk.register_with_studio(
-            studio_address,
-            agent_id=self.agent_id,
-            role=_ROLE_WORKER,
-            stake_amount=WORKER_STAKE_WEI,
-        )
-        logger.info("sdk_client.worker_registered", studio=studio_address)
+        # Register with studio as worker (includes staking).
+        # Tolerate "Already registered" — the worker may have registered
+        # in a prior run before the agent was restarted.  The contract's
+        # registerAgent checks `_agentIds[msg.sender] == 0` and reverts
+        # on duplicate registration for the same wallet.
+        try:
+            self.sdk.register_with_studio(
+                studio_address,
+                agent_id=self.agent_id,
+                role=_ROLE_WORKER,
+                stake_amount=WORKER_STAKE_WEI,
+            )
+            logger.info("sdk_client.worker_registered", studio=studio_address)
+        except Exception as exc:
+            exc_str = str(exc)
+            if "Already registered" in exc_str or "registration transaction failed" in exc_str:
+                logger.debug("sdk_client.worker_already_registered", studio=studio_address)
+            else:
+                raise
 
         # Build data hash for gateway submission
         evidence_payload_str = json.dumps(
