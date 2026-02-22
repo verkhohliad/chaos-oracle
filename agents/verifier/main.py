@@ -163,6 +163,21 @@ async def run(config: VerifierConfig) -> NoReturn:
                         if pair in scored_pairs:
                             continue
 
+                        # Skip submissions with no evidence CID yet.
+                        # The worker writes to evidence_map.json AFTER
+                        # the Gateway workflow completes, so there's a
+                        # short window where the on-chain WorkSubmitted
+                        # event exists but the evidence CID isn't
+                        # available.  We'll pick it up on the next poll.
+                        if not submission.evidence_cid:
+                            logger.debug(
+                                "verifier.skipping_no_evidence",
+                                studio=studio_address,
+                                worker=submission.worker_address,
+                                data_hash=submission.data_hash,
+                            )
+                            continue
+
                         logger.info(
                             "verifier.auditing_submission",
                             studio=studio_address,
@@ -171,7 +186,7 @@ async def run(config: VerifierConfig) -> NoReturn:
                         )
 
                         try:
-                            # 1. Fetch evidence from Arweave
+                            # 1. Fetch evidence from Arweave/IPFS
                             evidence_package = await arweave.fetch_evidence(
                                 submission.evidence_cid,
                             )
