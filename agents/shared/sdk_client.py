@@ -9,6 +9,7 @@ Adapted for **chaoschain-sdk v0.4.1** API.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import tempfile
@@ -43,7 +44,8 @@ _AGENT_ID_CACHE_PATH = Path("chaoschain_agent_ids.json")
 # Verifiers read from this file to resolve evidence CIDs when
 # getEvidenceCID() returns empty (submitWork single-agent doesn't store on-chain).
 _EVIDENCE_MAP_PATH = Path(os.environ.get("SHARED_DIR", "/shared")) / "evidence_map.json"
-_EVIDENCE_MAP_LOCK = threading.Lock()
+_EVIDENCE_MAP_LOCK_PATH = _EVIDENCE_MAP_PATH.parent / "evidence_map.lock"
+_EVIDENCE_MAP_LOCK = threading.Lock()  # intra-process; fcntl.flock handles cross-process
 
 # SDK role integers (StudioProxy registerAgent uses uint8 role codes)
 _ROLE_WORKER = 1
@@ -526,34 +528,66 @@ class ChaosOracleSDKClient:
     def _write_evidence_mapping(data_hash_hex: str, evidence_cid: str) -> None:
         """Append a ``{dataHash: evidenceCID}`` entry to the shared evidence map.
 
-        Thread-safe via a module-level lock.  Multiple workers may run
-        concurrently in the sandbox, each writing their own mapping.
+        Uses ``fcntl.flock()`` for cross-process mutual exclusion (works
+        across Docker containers sharing the same volume) and atomic
+        rename for write safety.  The ``threading.Lock`` is kept as
+        defence-in-depth for intra-process thread safety.
         """
-        with _EVIDENCE_MAP_LOCK:
-            mapping: dict[str, str] = {}
-            if _EVIDENCE_MAP_PATH.exists():
-                try:
-                    mapping = json.loads(_EVIDENCE_MAP_PATH.read_text())
-                except (json.JSONDecodeError, OSError):
-                    pass
-
-            # Strip 0x prefix for consistency with registry_reader lookup
-            key = data_hash_hex.removeprefix("0x")
-            mapping[key] = evidence_cid
-
+        with _EVIDENCE_MAP_LOCK:  # intra-process (threads)
             try:
                 _EVIDENCE_MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
-                _EVIDENCE_MAP_PATH.write_text(json.dumps(mapping, indent=2))
-                logger.info(
-                    "sdk_client.evidence_mapping_written",
-                    data_hash=key,
-                    evidence_cid=evidence_cid,
-                    path=str(_EVIDENCE_MAP_PATH),
-                )
+
+                # Acquire cross-process exclusive lock via lockfile
+                lock_fd = open(_EVIDENCE_MAP_LOCK_PATH, "w")
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                try:
+                    # Read current mapping (inside the lock)
+                    mapping: dict[str, str] = {}
+                    if _EVIDENCE_MAP_PATH.exists():
+                        try:
+                            mapping = json.loads(_EVIDENCE_MAP_PATH.read_text())
+                        except (json.JSONDecodeError, OSError):
+                            pass
+
+                    # Strip 0x prefix for consistency with registry_reader lookup
+                    key = data_hash_hex.removeprefix("0x")
+                    mapping[key] = evidence_cid
+
+                    # Atomic write: temp file -> fsync -> rename (same fs)
+                    tmp_fd = tempfile.NamedTemporaryFile(
+                        mode="w",
+                        dir=str(_EVIDENCE_MAP_PATH.parent),
+                        prefix=".evidence_map_",
+                        suffix=".tmp",
+                        delete=False,
+                    )
+                    try:
+                        tmp_fd.write(json.dumps(mapping, indent=2))
+                        tmp_fd.flush()
+                        os.fsync(tmp_fd.fileno())
+                        tmp_fd.close()
+                        os.rename(tmp_fd.name, str(_EVIDENCE_MAP_PATH))
+                    except BaseException:
+                        tmp_fd.close()
+                        try:
+                            os.unlink(tmp_fd.name)
+                        except OSError:
+                            pass
+                        raise
+
+                    logger.info(
+                        "sdk_client.evidence_mapping_written",
+                        data_hash=key,
+                        evidence_cid=evidence_cid,
+                        path=str(_EVIDENCE_MAP_PATH),
+                    )
+                finally:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    lock_fd.close()
             except OSError:
                 logger.exception(
                     "sdk_client.evidence_mapping_write_failed",
-                    data_hash=key,
+                    data_hash=data_hash_hex.removeprefix("0x"),
                 )
 
     # ------------------------------------------------------------------

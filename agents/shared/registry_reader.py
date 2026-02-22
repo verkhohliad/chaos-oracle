@@ -13,6 +13,7 @@ submissions via ``WorkSubmitted`` events from StudioProxy.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from dataclasses import dataclass, field
@@ -87,6 +88,7 @@ STUDIO_PROXY_VIEW_ABI: list[dict] = [
 # Path to shared evidence mapping file (Docker shared volume)
 _SHARED_DIR_PATH = Path(os.environ.get("SHARED_DIR", "/shared"))
 _EVIDENCE_MAP_PATH = _SHARED_DIR_PATH / "evidence_map.json"
+_EVIDENCE_MAP_LOCK_PATH = _SHARED_DIR_PATH / "evidence_map.lock"
 
 
 def _get_deploy_block() -> int:
@@ -140,11 +142,21 @@ def _load_evidence_map() -> dict[str, str]:
     Workers write ``{dataHash: evidenceCID}`` here after submitting work.
     Used as a fallback when ``getEvidenceCID()`` returns empty (single-agent
     ``submitWork()`` doesn't store the CID on-chain).
+
+    Acquires a shared (read) lock via ``fcntl.flock()`` to prevent reading
+    a partially written file during a concurrent write from another
+    container.
     """
     if not _EVIDENCE_MAP_PATH.exists():
         return {}
     try:
-        return json.loads(_EVIDENCE_MAP_PATH.read_text())
+        lock_fd = open(_EVIDENCE_MAP_LOCK_PATH, "w")
+        fcntl.flock(lock_fd, fcntl.LOCK_SH)
+        try:
+            return json.loads(_EVIDENCE_MAP_PATH.read_text())
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
     except (json.JSONDecodeError, OSError):
         return {}
 

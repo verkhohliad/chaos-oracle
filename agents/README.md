@@ -58,7 +58,7 @@ Every `POLL_INTERVAL_SECONDS` (default 5):
    - Audit evidence using OpenAI (accuracy, source quality, reasoning)
    - Register as verifier on studio (stake 0.001 ETH)
    - Submit scores via ChaosChain Gateway (x402 payment)
-   - Scores: `[accuracy, evidence_quality, source_diversity, reasoning_depth]` (each 0-100)
+   - Scores: 9 dimensions (5 universal PoA + 4 prediction-specific): Initiative, Collaboration, Reasoning Depth, Compliance, Efficiency, Accuracy, Evidence Quality, Source Diversity, Reasoning Depth (each 0-100, truncated to 5 on-chain)
    - Each verifier scores **all** workers (e.g. 3 verifiers x 3 workers = 9 total score events)
 3. Track scored (studio, worker) pairs (in-memory set)
 4. After settlement, withdraw stake + rewards from studio
