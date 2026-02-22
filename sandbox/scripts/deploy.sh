@@ -20,14 +20,17 @@ STUDIO_PROXY_FACTORY="0x230e76a105A9737Ea801BB7d0624D495506EE257"
 CHAOSCHAIN_REGISTRY="0x7F38C1aFFB24F30500d9174ed565110411E42d50"
 REWARDS_DISTRIBUTOR="0x0549772a3fF4F095C57AEFf655B3ed97B7925C19"
 
-# CRE_FORWARDER = deployer address (so deployer can call onlyCRE functions)
+# CRE_FORWARDER = Chainlink Keystone Forwarder on Sepolia.
+# CRE writeReport routes txs through this contract. On an Anvil Sepolia fork
+# the real Forwarder already exists at the forked state, so CRE simulator
+# uses it directly (no mock deployment).
 DEPLOYER_ADDRESS=$(cast wallet address "$DEPLOYER_KEY")
-CRE_FORWARDER="$DEPLOYER_ADDRESS"
+CRE_FORWARDER="0x15fc6ae953e024d975e77382eeec56a9101f9f88"
 
 echo "=== ChaosOracle Sandbox Deployer ==="
 echo "RPC:       $RPC_URL"
 echo "Deployer:  $DEPLOYER_ADDRESS"
-echo "CRE Fwd:   $CRE_FORWARDER (= deployer, for sandbox testing)"
+echo "CRE Fwd:   $CRE_FORWARDER (Keystone Forwarder on Sepolia)"
 echo ""
 
 # ── Check RPC connectivity ──
@@ -137,6 +140,43 @@ if [ -z "$MARKET" ] || [ "$MARKET" = "null" ]; then
     exit 1
 fi
 echo "  ExamplePredictionMarket: $MARKET"
+
+# ── Authorize deployer on Keystone Forwarder ──
+# The CRE simulator signs reports with the deployer key and sends them to the
+# Keystone Forwarder. The Forwarder checks isForwarder(signer) and silently
+# drops reports from unauthorized signers. We impersonate the Forwarder owner
+# and call addForwarder(deployer) so CRE reports get relayed to the Registry.
+echo ""
+echo "=== Authorizing deployer on Keystone Forwarder ==="
+
+FORWARDER_OWNER=$(cast call --rpc-url "$RPC_URL" "$CRE_FORWARDER" "owner()(address)" 2>/dev/null || echo "")
+echo "Forwarder owner: $FORWARDER_OWNER"
+
+IS_AUTHORIZED=$(cast call --rpc-url "$RPC_URL" "$CRE_FORWARDER" "isForwarder(address)(bool)" "$DEPLOYER_ADDRESS" 2>/dev/null || echo "false")
+echo "Deployer already authorized: $IS_AUTHORIZED"
+
+if [ "$IS_AUTHORIZED" != "true" ] && [ -n "$FORWARDER_OWNER" ]; then
+    echo "Impersonating Forwarder owner to add deployer..."
+    cast rpc anvil_impersonateAccount "$FORWARDER_OWNER" --rpc-url "$RPC_URL" 2>/dev/null || true
+
+    # Fund the owner for gas
+    cast send --rpc-url "$RPC_URL" --private-key "$DEPLOYER_KEY" \
+        --value 0.01ether --json "$FORWARDER_OWNER" > /dev/null 2>&1 || true
+
+    ADD_TX=$(cast send --rpc-url "$RPC_URL" --from "$FORWARDER_OWNER" --unlocked --json \
+        "$CRE_FORWARDER" "addForwarder(address)" "$DEPLOYER_ADDRESS" 2>&1 || echo "FAILED")
+
+    if echo "$ADD_TX" | jq -e '.transactionHash' > /dev/null 2>&1; then
+        IS_NOW=$(cast call --rpc-url "$RPC_URL" "$CRE_FORWARDER" "isForwarder(address)(bool)" "$DEPLOYER_ADDRESS")
+        echo "Deployer authorized on Forwarder: $IS_NOW"
+    else
+        echo "WARNING: addForwarder failed: $ADD_TX"
+    fi
+
+    cast rpc anvil_stopImpersonatingAccount "$FORWARDER_OWNER" --rpc-url "$RPC_URL" 2>/dev/null || true
+else
+    echo "Deployer already authorized (or no Forwarder owner). Skipping."
+fi
 
 # ── Transfer RewardsDistributor ownership to gateway signer ──
 # The gateway needs to be the RD owner to call registerWork(), registerValidator(),

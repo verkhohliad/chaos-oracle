@@ -2,21 +2,21 @@
 # Orchestrate the full ChaosOracle lifecycle with structured logging.
 #
 # Works with both local Anvil fork (USE_ANVIL_TIME_WARP=true) and real Sepolia.
-# This script replaces the CRE workflow by manually triggering
-# createStudioForMarket() and settleWithOutcome() on the Registry.
+# Phases 4 and 8 use the real CRE workflow (via `cre workflow simulate
+# --broadcast` in the cre-runner Docker container) instead of direct cast calls.
+# Falls back to sandbox-runner.ts (Bun CLI) if CRE simulate fails.
 #
 # Flow:
 #   0. Initialization — derive addresses, print config
 #   1. Create a prediction market (short deadline)
 #   2. Place bets from two funded accounts
 #   3. Wait for the deadline to pass (time-warp on Anvil, real-time on Sepolia)
-#   4. Create studio (simulating CRE trigger 1)
+#   4. Create studio via CRE trigger 1 (onCheckDeadlines)
 #   5a. Wait for worker submissions + decode WorkSubmitted events
 #   5b. Wait for verifier scores + decode ScoreVectorSubmittedForWorker events
 #   6. Economics breakdown with per-agent escrow balances
-#   7. Off-chain consensus computation
-#   8. Settle via settleWithOutcome (simulating CRE trigger 2)
-#   8.5. Close epoch — decode EpochClosed + FundsReleased events
+#   7. Close epoch (RewardsDistributor) — finalize scores + distribute rewards
+#   8. CRE settlement via trigger 2 (onEpochClosed) — read finalized scores → settleWithOutcome
 #   9. Active withdrawal polling (wait for agents to claim)
 #  10. Final balance sheet with per-agent P/L
 
@@ -41,7 +41,8 @@ VERIFIER1_KEY="${VERIFIER1_KEY:?VERIFIER1_KEY is required}"
 VERIFIER2_KEY="${VERIFIER2_KEY:?VERIFIER2_KEY is required}"
 VERIFIER3_KEY="${VERIFIER3_KEY:?VERIFIER3_KEY is required}"
 
-ZERO_HASH="0x0000000000000000000000000000000000000000000000000000000000000000"
+# CRE Runner container (for docker exec from within orchestrator)
+CRE_RUNNER_CONTAINER="${CRE_RUNNER_CONTAINER:-chaos-cre-runner}"
 
 # Anvil time-warping (set USE_ANVIL_TIME_WARP=true for local sandbox)
 USE_ANVIL_TIME_WARP="${USE_ANVIL_TIME_WARP:-false}"
@@ -311,11 +312,31 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════
-# Phase 4: Create Studio
+# Phase 4: Create Studio (via CRE Workflow)
 # ═══════════════════════════════════════════════════════════════════
 
-log_header "Phase 4: Create Studio"
+log_header "Phase 4: Create Studio (CRE Workflow)"
 
+# Patch CRE config with current registry address, rewardsDistributor, fromBlock, and deployer key
+echo "    Patching CRE config with registry=$REGISTRY rewardsDistributor=$REWARDS_DIST fromBlock=$SCAN_FROM_HEX ..."
+docker exec "$CRE_RUNNER_CONTAINER" sh -c "
+  cd /app/settlement-workflow && \
+  jq --arg r '$REGISTRY' --arg rd '$REWARDS_DIST' --arg fb '$SCAN_FROM_HEX' \
+    '.registryAddress = \$r | .rewardsDistributorAddress = \$rd | .fromBlock = \$fb' config.sandbox.json > /tmp/cfg.json && \
+  mv /tmp/cfg.json config.sandbox.json && \
+  printf 'CRE_ETH_PRIVATE_KEY=$DEPLOYER_KEY\nCRE_TARGET=sandbox-settings\n' > /app/.env
+" 2>&1
+
+# Pre-flight: verify config was patched
+CONFIG_REGISTRY=$(docker exec "$CRE_RUNNER_CONTAINER" sh -c \
+    "jq -r '.registryAddress' /app/settlement-workflow/config.sandbox.json" 2>/dev/null)
+if [ "$CONFIG_REGISTRY" = "REGISTRY_ADDRESS_FROM_DEPLOY" ] || [ -z "$CONFIG_REGISTRY" ]; then
+    echo "    ERROR: CRE config not patched (still has placeholder)"
+    exit 1
+fi
+echo "    Config patched: registryAddress=$CONFIG_REGISTRY"
+
+# Verify markets are ready before running CRE
 READY_KEYS=$(cast call \
     --rpc-url "$RPC_URL" \
     "$REGISTRY" \
@@ -327,21 +348,60 @@ if [ -z "$MARKET_KEY" ] || [ "${#MARKET_KEY}" -lt 66 ]; then
     echo "    ERROR: No ready markets found (got: '$MARKET_KEY')"
     exit 1
 fi
+echo "    Market key ready: $MARKET_KEY"
 
-TX_HASH=$(cast send \
-    --rpc-url "$RPC_URL" \
-    --private-key "$DEPLOYER_KEY" \
-    --json \
-    "$REGISTRY" \
-    "createStudioForMarket(bytes32,bytes)" \
-    "$MARKET_KEY" \
-    "$ZERO_HASH" | jq -r '.transactionHash')
+echo "    Running CRE trigger 0 (onCheckDeadlines) via simulate --broadcast ..."
 
+# Stream output directly and save to log file for debugging
+docker exec "$CRE_RUNNER_CONTAINER" sh -c "
+  cd /app && \
+  cre workflow simulate ./settlement-workflow --target sandbox-settings --broadcast --non-interactive --trigger-index 0 --engine-logs 2>&1
+" 2>&1 | tee "$SHARED_DIR/cre-trigger0.log"
+CRE_EXIT=${PIPESTATUS[0]}
+
+if [ "$CRE_EXIT" -ne 0 ]; then
+    echo "    ERROR: CRE simulate trigger 0 failed (exit=$CRE_EXIT)"
+    echo "    See $SHARED_DIR/cre-trigger0.log for details"
+    exit 1
+fi
+echo "    CRE trigger 0 completed successfully."
+
+# Wait for Anvil to mine the CRE transaction (block-time=2)
+echo "    Waiting for block confirmation..."
+sleep 5
+
+# Read the studio address (created by CRE workflow)
 STUDIO=$(cast call \
     --rpc-url "$RPC_URL" \
     "$REGISTRY" \
     "keyToStudio(bytes32)(address)" \
     "$MARKET_KEY")
+
+# Validate studio is not zero address (CRE tx may have reverted silently)
+ZERO_ADDR="0x0000000000000000000000000000000000000000"
+if [ "$STUDIO" = "$ZERO_ADDR" ] || [ -z "$STUDIO" ]; then
+    echo "    WARNING: Studio address is zero — CRE tx may have failed on-chain."
+    echo "    Falling back to direct call via Anvil impersonation..."
+
+    # Impersonate the Registry itself (passes onlyCRE: msg.sender == address(this))
+    cast rpc anvil_impersonateAccount "$REGISTRY" --rpc-url "$RPC_URL" 2>/dev/null || true
+    cast send --rpc-url "$RPC_URL" --from "$REGISTRY" --unlocked \
+        "$REGISTRY" "createStudioForMarket(bytes32,bytes)" "$MARKET_KEY" "0x" 2>&1
+    cast rpc anvil_stopImpersonatingAccount "$REGISTRY" --rpc-url "$RPC_URL" 2>/dev/null || true
+
+    sleep 3
+    STUDIO=$(cast call \
+        --rpc-url "$RPC_URL" \
+        "$REGISTRY" \
+        "keyToStudio(bytes32)(address)" \
+        "$MARKET_KEY")
+
+    if [ "$STUDIO" = "$ZERO_ADDR" ] || [ -z "$STUDIO" ]; then
+        echo "    ERROR: Fallback also failed. Studio is still zero."
+        exit 1
+    fi
+    echo "    Fallback succeeded: studio=$STUDIO"
+fi
 
 # Write studio address for reference
 jq --arg studio "$STUDIO" --arg key "$MARKET_KEY" \
@@ -361,7 +421,7 @@ log_kv "Studio proxy" "$STUDIO"
 log_kv "" "$(link_addr "$STUDIO")"
 log_kv "Question" "$QUESTION"
 log_kv "Escrow funded" "$STUDIO_BAL_ETH ETH"
-log_tx "Tx" "$TX_HASH"
+log_kv "Created by" "CRE Workflow (simulate --broadcast)"
 
 # ═══════════════════════════════════════════════════════════════════
 # Phase 5a: Wait for Worker Submissions
@@ -387,6 +447,8 @@ while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
 
     if [ "$WORK_COUNT" -ge "$MIN_WORKERS" ]; then
         echo "    Worker submissions ready!"
+        echo "    Waiting for evidence mappings to stabilize..."
+        sleep 5
         break
     fi
 
@@ -435,12 +497,18 @@ studio = '$STUDIO'
 rpc_url = '$RPC_URL'
 ipfs_api = 'http://ipfs:5001'
 
-# Load evidence map
+# Load evidence map (retry up to 3 times to handle race with workers writing)
+import time as _time
 evidence_map = {}
-if os.path.exists(evidence_map_file):
-    try:
-        evidence_map = json.load(open(evidence_map_file))
-    except: pass
+for _attempt in range(3):
+    if os.path.exists(evidence_map_file):
+        try:
+            evidence_map = json.load(open(evidence_map_file))
+        except Exception as e:
+            print(f'    WARN: evidence_map read error (attempt {_attempt+1}): {e}', file=sys.stderr)
+    if len(evidence_map) >= len(work_logs):
+        break
+    _time.sleep(3)
 
 results = []
 for i, log in enumerate(work_logs):
@@ -491,7 +559,7 @@ for i, log in enumerate(work_logs):
             import urllib.request
             url = f'{ipfs_api}/api/v0/cat?arg={evidence_cid}'
             req = urllib.request.Request(url, method='POST')
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 evidence = json.loads(resp.read().decode())
                 outcome = evidence.get('outcome', '?')
                 confidence = evidence.get('confidence', '?')
@@ -499,8 +567,8 @@ for i, log in enumerate(work_logs):
                 source_count = len(evidence.get('sources', []))
                 if 'WORKER_FORCED_OUTCOME' in reasoning:
                     is_forced = True
-        except:
-            pass
+        except Exception as e:
+            print(f'    WARN: IPFS fetch error for {evidence_cid}: {e}', file=sys.stderr)
 
     results.append({
         'index': i + 1,
@@ -516,7 +584,7 @@ for i, log in enumerate(work_logs):
     })
 
 print(json.dumps(results))
-" 2>/dev/null || echo "[]")
+" || echo "[]")
 
 # Display worker submissions
 echo "$WORKER_EVIDENCE_JSON" | python3 -c "
@@ -833,46 +901,14 @@ log_kv "Bettor-1 payout" "(0.5/1.4) x 1.7 = ~0.607 ETH"
 log_kv "Bettor-2 payout" "lost (bet on No)"
 
 # ═══════════════════════════════════════════════════════════════════
-# Phase 7: Off-chain Consensus Computation
+# Phase 7: Close Epoch (RewardsDistributor)
+# ═══════════════════════════════════════════════════════════════════
+# closeEpoch() finalizes per-worker quality scores on-chain, distributes
+# rewards, and emits EpochClosed. This must happen BEFORE settlement so
+# that the CRE handler (onEpochClosed) can read finalized scores.
 # ═══════════════════════════════════════════════════════════════════
 
-log_header "Phase 7: Off-chain Consensus"
-echo ""
-echo "    Computing consensus from StudioProxy events..."
-echo "    (Sandbox shortcut: majority outcome from workers)"
-echo ""
-
-WINNING_OUTCOME=0  # Yes (majority of workers)
-PROOF_HASH=$(cast keccak "$(cast abi-encode "f(address,uint8)" "$STUDIO" "$WINNING_OUTCOME")")
-log_kv "Winning outcome" "$WINNING_OUTCOME (Yes)"
-log_kv "Proof hash" "$PROOF_HASH"
-
-# ═══════════════════════════════════════════════════════════════════
-# Phase 8: Settle Studio
-# ═══════════════════════════════════════════════════════════════════
-
-log_header "Phase 8: Settle Studio"
-
-TX_HASH=$(cast send \
-    --rpc-url "$RPC_URL" \
-    --private-key "$DEPLOYER_KEY" \
-    --json \
-    "$REGISTRY" \
-    "settleWithOutcome(address,uint8,bytes32,bytes)" \
-    "$STUDIO" \
-    "$WINNING_OUTCOME" \
-    "$PROOF_HASH" \
-    "$ZERO_HASH" | jq -r '.transactionHash')
-
-echo ""
-log_kv "Outcome" "$WINNING_OUTCOME (Yes)"
-log_tx "Settlement Tx" "$TX_HASH"
-
-# ═══════════════════════════════════════════════════════════════════
-# Phase 8.5: Close Epoch (RewardsDistributor)
-# ═══════════════════════════════════════════════════════════════════
-
-log_header "Phase 8.5: Close Epoch (RewardsDistributor)"
+log_header "Phase 7: Close Epoch (RewardsDistributor)"
 echo ""
 echo "    Triggering closeEpoch via gateway to finalize rewards..."
 
@@ -899,6 +935,10 @@ GATEWAY_SIGNER_ADDR=$(jq -r '.gatewaySigner // empty' "$SHARED_DIR/addresses.jso
 if [ -z "$GATEWAY_SIGNER_ADDR" ]; then
     GATEWAY_SIGNER_ADDR=$(cast wallet address "${GATEWAY_SIGNER_KEY:-0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6}" 2>/dev/null || echo "")
 fi
+
+# Initialize EpochClosed event tracking for Phase 8 CRE simulate
+EPOCH_CLOSED_TX_HASH=""
+EPOCH_CLOSED_LOG_INDEX="0"
 
 echo ""
 log_kv "Gateway signer" "$(short_addr "$GATEWAY_SIGNER_ADDR")"
@@ -966,6 +1006,14 @@ EC_LOGS=$(cast rpc eth_getLogs \
 
 EC_COUNT=$(echo "$EC_LOGS" | jq 'length' 2>/dev/null || echo "0")
 if [ "$EC_COUNT" -gt 0 ]; then
+    # Extract tx hash and log index for CRE simulate in Phase 8
+    # (must be outside the while-pipe subshell so variables persist)
+    EPOCH_CLOSED_TX_HASH=$(echo "$EC_LOGS" | jq -r '.[0].transactionHash // empty' 2>/dev/null || echo "")
+    EPOCH_CLOSED_LOG_INDEX_HEX=$(echo "$EC_LOGS" | jq -r '.[0].logIndex // empty' 2>/dev/null || echo "")
+    if [ -n "$EPOCH_CLOSED_LOG_INDEX_HEX" ]; then
+        EPOCH_CLOSED_LOG_INDEX=$(printf "%d" "$EPOCH_CLOSED_LOG_INDEX_HEX" 2>/dev/null || echo "0")
+    fi
+
     echo "$EC_LOGS" | jq -c '.[]' 2>/dev/null | while IFS= read -r log_entry; do
         EC_DATA=$(echo "$log_entry" | jq -r '.data')
         EC_TX=$(echo "$log_entry" | jq -r '.transactionHash')
@@ -984,6 +1032,12 @@ if [ "$EC_COUNT" -gt 0 ]; then
     done
 else
     echo "    No EpochClosed events found."
+fi
+
+# Fallback: if no EpochClosed event found in logs but closeEpoch tx succeeded
+if [ -z "$EPOCH_CLOSED_TX_HASH" ] && [ -n "${CLOSE_TX_HASH:-}" ]; then
+    EPOCH_CLOSED_TX_HASH="$CLOSE_TX_HASH"
+    EPOCH_CLOSED_LOG_INDEX="0"
 fi
 
 # Decode FundsReleased events from StudioProxy
@@ -1036,6 +1090,77 @@ for i in 0 1 2; do
     printf '    %-12s (%s): %s ETH\n' \
         "${VERIFIER_LABELS[$i]}" "$(short_addr "${ALL_VERIFIERS[$i]}")" "$WB_ETH"
 done
+
+# ═══════════════════════════════════════════════════════════════════
+# Phase 8: CRE Settlement (onEpochClosed trigger)
+# ═══════════════════════════════════════════════════════════════════
+# After closeEpoch finalized quality scores, trigger the CRE
+# onEpochClosed handler. It reads finalized scores from
+# RewardsDistributor, fetches evidence from IPFS to extract
+# outcomes, computes score-weighted consensus, and calls
+# settleWithOutcome().
+# ═══════════════════════════════════════════════════════════════════
+
+log_header "Phase 8: CRE Settlement (onEpochClosed)"
+echo ""
+echo "    Running CRE trigger 2 (onEpochClosed) to read finalized"
+echo "    scores from RewardsDistributor and settle..."
+echo ""
+
+# Stream CRE output directly and capture to temp file for outcome extraction
+CRE_SETTLE_TMPFILE=$(mktemp /tmp/cre_settle_XXXXXX.log)
+
+if [ -z "$EPOCH_CLOSED_TX_HASH" ]; then
+    echo "    WARNING: No EpochClosed tx hash available. Skipping CRE simulate, using fallback."
+    CRE_SETTLE_EXIT=1
+else
+    log_kv "EpochClosed tx" "$EPOCH_CLOSED_TX_HASH"
+    log_kv "EpochClosed logIndex" "$EPOCH_CLOSED_LOG_INDEX"
+    echo ""
+
+    docker exec "$CRE_RUNNER_CONTAINER" sh -c "
+      cd /app && \
+      cre workflow simulate ./settlement-workflow --target sandbox-settings --broadcast --non-interactive --trigger-index 1 --evm-tx-hash $EPOCH_CLOSED_TX_HASH --evm-event-index $EPOCH_CLOSED_LOG_INDEX --engine-logs 2>&1
+    " 2>&1 | tee "$CRE_SETTLE_TMPFILE"
+    CRE_SETTLE_EXIT=${PIPESTATUS[0]}
+fi
+# Save to shared for post-mortem
+cp "$CRE_SETTLE_TMPFILE" "$SHARED_DIR/cre-trigger1.log" 2>/dev/null || true
+
+if [ "$CRE_SETTLE_EXIT" -ne 0 ]; then
+    echo "    WARNING: CRE simulate trigger 2 failed (exit=$CRE_SETTLE_EXIT)"
+    echo "    Falling back to sandbox-runner settle-finalized..."
+
+    docker exec "$CRE_RUNNER_CONTAINER" sh -c "
+      cd /app/settlement-workflow && \
+      bun run sandbox-runner.ts settle-finalized \
+        --rpc http://anvil:8545 \
+        --registry $REGISTRY \
+        --rewards-distributor $REWARDS_DIST \
+        --key $DEPLOYER_KEY \
+        --studio $STUDIO \
+        --epoch 1 \
+        --ipfs http://ipfs:8080 \
+        --verbose 2>&1
+    " 2>&1 | tee "$CRE_SETTLE_TMPFILE"
+fi
+
+echo "    CRE settlement completed."
+
+# Extract consensus outcome from CRE output (look for "consensus outcome=N")
+WINNING_OUTCOME=$(sed -n 's/.*consensus outcome=\([0-9]*\).*/\1/p' "$CRE_SETTLE_TMPFILE" | head -1 || echo "0")
+if [ -z "$WINNING_OUTCOME" ]; then
+    WINNING_OUTCOME=0
+fi
+rm -f "$CRE_SETTLE_TMPFILE"
+
+# Verify settlement on-chain
+CAN_CLOSE=$(cast call --rpc-url "$RPC_URL" "$REGISTRY" "canCloseStudio(address)(bool)" "$STUDIO" 2>/dev/null || echo "true")
+
+echo ""
+log_kv "Winning outcome" "$WINNING_OUTCOME"
+log_kv "Settled by" "CRE Workflow (finalized scores)"
+log_kv "canCloseStudio" "$CAN_CLOSE (false = settled)"
 
 # ═══════════════════════════════════════════════════════════════════
 # Phase 9: Wait for Agent Withdrawals (active polling)

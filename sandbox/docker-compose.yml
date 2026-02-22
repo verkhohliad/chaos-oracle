@@ -1,7 +1,7 @@
 # ChaosOracle Full Local Sandbox
 #
-# 13 services: anvil, postgres, ipfs, otterscan, gateway, deployer,
-# orchestrator, 3 workers, 3 verifiers.
+# 14 services: anvil, postgres, ipfs, otterscan, gateway, deployer,
+# cre-runner, orchestrator, 3 workers, 3 verifiers.
 #
 # Quick start:
 #   cp .env.example .env   # Set SEPOLIA_RPC and OPENAI_API_KEY
@@ -126,6 +126,25 @@ services:
     volumes:
       - shared:/shared
 
+  # ── CRE Runner: Chainlink CRE CLI + Bun for workflow simulation ──
+
+  cre-runner:
+    container_name: chaos-cre-runner
+    build:
+      context: ../cre-workflow
+      dockerfile: ../sandbox/Dockerfile.cre-runner
+    environment:
+      - CRE_ETH_PRIVATE_KEY=${DEPLOYER_PRIVATE_KEY}
+      - CRE_TARGET=sandbox-settings
+    depends_on:
+      deployer:
+        condition: service_completed_successfully
+      anvil:
+        condition: service_healthy
+    volumes:
+      - shared:/shared
+      - ${HOME}/.cre:/root/.cre
+
   # ── Orchestrator: Drives the lifecycle (simulates CRE triggers) ──
 
   orchestrator:
@@ -149,13 +168,18 @@ services:
       - VERIFIER1_KEY=${VERIFIER1_KEY}
       - VERIFIER2_KEY=${VERIFIER2_KEY}
       - VERIFIER3_KEY=${VERIFIER3_KEY}
+      # CRE Runner container name for docker exec from within orchestrator
+      - CRE_RUNNER_CONTAINER=chaos-cre-runner
     depends_on:
       deployer:
         condition: service_completed_successfully
       gateway:
         condition: service_started
+      cre-runner:
+        condition: service_started
     volumes:
       - shared:/shared
+      - /var/run/docker.sock:/var/run/docker.sock
 
   # ── Workers: 3 real agents using local ChaosChain Gateway ──
 

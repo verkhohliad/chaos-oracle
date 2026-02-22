@@ -1,6 +1,6 @@
 # 🔮 ChaosOracle Sandbox
 
-Full self-contained local environment for the ChaosOracle prediction market settlement system. Runs 13 Docker services including a local Anvil fork, ChaosChain Gateway, IPFS node, Otterscan block explorer, and AI-powered worker/verifier agents.
+Full self-contained local environment for the ChaosOracle prediction market settlement system. Runs 14 Docker services including a local Anvil fork, ChaosChain Gateway, IPFS node, Otterscan block explorer, and AI-powered worker/verifier agents.
 
 ---
 
@@ -57,11 +57,10 @@ The orchestrator prints structured logs for each phase:
   Worker-3 marked as "FORCED OUTCOME" (bad answer for slashing test)
 ═══ Phase 5b: Verifier Scores ═══
   Score matrix grouped by worker (3 verifiers x 3 workers = 9 scores)
-  Dimensions: accuracy, evidence_quality, source_diversity, reasoning_depth
+  Dimensions: 9 total (5 universal PoA + 4 prediction-specific), truncated to 5 on-chain
 ═══ Phase 6: Economics Breakdown ═══
-═══ Phase 7: Off-chain Consensus ═══
-═══ Phase 8: Settle Studio ═══
-═══ Phase 8.5: Close Epoch (RewardsDistributor) ═══
+═══ Phase 7: Close Epoch (RewardsDistributor) ═══
+═══ Phase 8: CRE Settlement (onEpochClosed) ═══
 ═══ Phase 9: Agent Withdrawals ═══
 ═══ Phase 10: Final Balance Sheet ═══
   Per-agent: outcome, stake, reward, net P/L, status (Rewarded/Slashed)
@@ -113,7 +112,7 @@ docker compose down -v    # remove containers + volumes
               All agents use Gateway + IPFS for evidence
 ```
 
-### Services (13 total)
+### Services (14 total)
 
 | Service | Image | Purpose | Port |
 |---------|-------|---------|------|
@@ -124,6 +123,7 @@ docker compose down -v    # remove containers + volumes
 | `gateway` | Built from submodule | ChaosChain Gateway API | 3000 |
 | `deployer` | foundry | One-shot contract deployment | --- |
 | `orchestrator` | foundry | Drives lifecycle (simulates CRE) | --- |
+| `cre-runner` | Built from cre-workflow | CRE CLI + Bun for workflow simulation | --- |
 | `worker-{1,2,3}` | python:3.12 | AI research + work submission | --- |
 | `verifier-{1,2,3}` | python:3.12 | AI audit + score submission | --- |
 
@@ -136,7 +136,7 @@ docker compose down -v    # remove containers + volumes
 3. **Orchestrator** creates a market, places bets, time-warps past the deadline, creates a ChaosChain studio
 4. **Workers** discover the studio via the Gateway, register, research the question with GPT, submit work + evidence to IPFS
 5. **Verifiers** discover worker submissions via the Gateway, fetch evidence from IPFS, audit each submission, submit quality scores (each verifier scores all 3 workers = 9 total scores)
-6. **Orchestrator** computes consensus (majority outcome), calls `settleWithOutcome()` on the Registry, then calls `closeEpoch()` on RewardsDistributor to distribute rewards and slash wrong workers
+6. **RewardsDistributor.closeEpoch()** finalizes quality scores, then CRE reads finalized scores and computes consensus outcome
 7. **Agents** withdraw their stakes and rewards from the studio
 8. **Orchestrator** prints a final balance sheet showing per-agent outcomes, rewards, slashing status, and a reward verification summary
 9. **Otterscan** at [http://localhost:5100](http://localhost:5100) lets you browse all transactions, contracts, and events
@@ -150,16 +150,16 @@ docker compose down -v    # remove containers + volumes
 In production, the Chainlink CRE (Compute Runtime Environment) runs on a Decentralized Oracle Network:
 
 - **Trigger 1** (cron): Polls `getMarketsReadyForSettlement()`, calls `createStudioForMarket()` when deadline passes
-- **Trigger 2** (log): Watches for `canCloseStudio()`, reads events from StudioProxy, fetches evidence from Arweave, computes score-weighted consensus, calls `settleWithOutcome()`
+- **Trigger 2** (log): Listens for EpochClosed event on RewardsDistributor, reads finalized quality scores, fetches evidence from Arweave, computes score-weighted consensus, calls `settleWithOutcome()`
 
 ### Sandbox (Orchestrator)
 
-CRE workflows **cannot** run locally with live triggers (only `cre workflow simulate .` works for testing). The orchestrator script mimics both CRE triggers:
+CRE workflows run via `cre workflow simulate --broadcast` inside the `cre-runner` Docker container. The orchestrator script drives the lifecycle:
 
-1. Calls `createStudioForMarket()` directly (with `creForwarder = deployer`)
-2. Polls `canCloseStudio()`, computes consensus, calls `settleWithOutcome()`
-3. Calls `closeEpoch()` on RewardsDistributor to distribute rewards and slash wrong workers
-4. Waits for agents to withdraw, then prints a detailed balance sheet
+1. `closeEpoch()` via Gateway finalizes quality scores
+2. CRE settlement reads finalized scores and computes consensus outcome
+3. `closeEpoch()` on RewardsDistributor distributes rewards and slashes wrong workers
+4. Agents withdraw stakes and rewards
 
 To test CRE workflow logic independently:
 
@@ -247,10 +247,11 @@ The `-v` flag removes all volumes (shared, postgres data, IPFS data), forcing a 
 
 ```
 sandbox/
-  docker-compose.yml        # 13-service orchestration
+  docker-compose.yml        # 14-service orchestration
   .env.example              # Anvil keys + required env vars
   Dockerfile.foundry        # Foundry image for deployer/orchestrator
   Dockerfile.agents         # Python image for workers/verifiers
+  Dockerfile.cre-runner     # CRE CLI + Bun runtime
   Dockerfile.gateway        # ChaosChain Gateway (from submodule)
   scripts/
     deploy.sh               # Deploy contracts to Anvil fork

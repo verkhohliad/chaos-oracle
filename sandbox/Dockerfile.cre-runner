@@ -1,0 +1,34 @@
+# =============================================================================
+# CRE Runner: Docker image with Chainlink CRE CLI + Bun runtime
+# =============================================================================
+# Used in sandbox to run `cre workflow simulate --broadcast` against Anvil.
+# Build context should be ../cre-workflow (the full cre-workflow directory)
+# because project.yaml lives at the cre-workflow root.
+# =============================================================================
+
+FROM oven/bun:latest
+
+# Install CRE CLI binary from GitHub releases
+ARG CRE_VERSION=1.1.0
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates jq && \
+    ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "amd64") && \
+    curl -fsSL "https://github.com/smartcontractkit/cre-cli/releases/download/v${CRE_VERSION}/cre_linux_${ARCH}.tar.gz" \
+      -o /tmp/cre.tar.gz && \
+    tar -xzf /tmp/cre.tar.gz -C /tmp/ && \
+    mv /tmp/cre_v${CRE_VERSION}_linux_${ARCH} /usr/local/bin/cre && \
+    chmod +x /usr/local/bin/cre && \
+    rm /tmp/cre.tar.gz && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy full cre-workflow directory
+COPY . .
+
+# Install dependencies (includes cre-setup postinstall for WASM compilation)
+WORKDIR /app/settlement-workflow
+RUN bun install
+
+# Keep container running for exec commands from orchestrator
+CMD ["sleep", "infinity"]
