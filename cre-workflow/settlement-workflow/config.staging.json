@@ -1,0 +1,6 @@
+{
+  "registryAddress": "0x1026d1E024326796d4f9df25300aBad2CFb4c872",
+  "rewardsDistributorAddress": "0x0549772a3fF4F095C57AEFf655B3ed97B7925C19",
+  "chainSelectorName": "ethereum-testnet-sepolia",
+  "gasLimit": "6000000"
+}

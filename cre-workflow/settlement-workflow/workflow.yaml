@@ -1,0 +1,23 @@
+staging-settings:
+  user-workflow:
+    workflow-name: "chaosoracle-settlement-staging"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.staging.json"
+    secrets-path: ""
+
+production-settings:
+  user-workflow:
+    workflow-name: "chaosoracle-settlement-production"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.production.json"
+    secrets-path: ""
+
+sandbox-settings:
+  user-workflow:
+    workflow-name: "chaosoracle-settlement-sandbox"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.sandbox.json"
+    secrets-path: ""

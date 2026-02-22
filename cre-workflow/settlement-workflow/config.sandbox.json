@@ -1,0 +1,13 @@
+{
+  "registryAddress": "REGISTRY_ADDRESS_FROM_DEPLOY",
+  "rewardsDistributorAddress": "REWARDS_DISTRIBUTOR_ADDRESS_FROM_DEPLOY",
+  "chainSelectorName": "ethereum-testnet-sepolia",
+  "gasLimit": "6000000",
+  "minWorkers": "3",
+  "minValidators": "2",
+  "minScoresPerWorker": "2",
+  "rpcUrl": "http://anvil:8545",
+  "arweaveGatewayUrl": "https://arweave.net",
+  "ipfsGatewayUrl": "http://ipfs:8080",
+  "fromBlock": "FROM_BLOCK_FROM_DEPLOY"
+}

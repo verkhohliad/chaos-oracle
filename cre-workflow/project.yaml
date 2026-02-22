@@ -1,0 +1,26 @@
+# ==========================================================================
+# CRE PROJECT SETTINGS FILE
+# ==========================================================================
+# Project-specific settings for CRE CLI targets.
+# Each target defines rpcs groups for supported chains.
+#
+# ChaosOracle settlement workflow targets Ethereum Sepolia for contract interaction.
+
+# ==========================================================================
+staging-settings:
+  rpcs:
+    - chain-name: ethereum-testnet-sepolia
+      url: https://ethereum-sepolia-rpc.publicnode.com
+
+# ==========================================================================
+production-settings:
+  rpcs:
+    - chain-name: ethereum-testnet-sepolia
+      url: https://ethereum-sepolia-rpc.publicnode.com
+
+# ==========================================================================
+# Sandbox: Anvil fork running inside Docker (docker-compose network)
+sandbox-settings:
+  rpcs:
+    - chain-name: ethereum-testnet-sepolia
+      url: http://anvil:8545
