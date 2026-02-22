@@ -51,6 +51,15 @@ interface IChaosOracleRegistry {
         uint256 deadline
     ) external payable;
 
+    // ============ Keystone Forwarder Receiver ============
+
+    /// @notice Receives CRE reports routed through the Keystone Forwarder.
+    ///         The Forwarder calls onReport(metadata, payload) where payload is
+    ///         the ABI-encoded function call (selector + args) dispatched via self-call.
+    /// @param metadata CRE report metadata (first 32 bytes = workflow ID)
+    /// @param payload The ABI-encoded function call to dispatch
+    function onReport(bytes calldata metadata, bytes calldata payload) external;
+
     // ============ CRE-Only Functions ============
 
     /// @notice Create a ChaosChain studio for a pending market (CRE-triggered)

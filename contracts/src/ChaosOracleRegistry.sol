@@ -99,9 +99,12 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
 
     // ============ Modifiers ============
 
+    /// @dev Allow calls from (a) the CRE Forwarder directly, or (b) self-calls
+    ///      dispatched from onReport(). Self-calls are safe because onReport()
+    ///      already validated msg.sender == creForwarder and the workflow ID.
     modifier onlyCRE(bytes calldata creReport) {
-        if (msg.sender != creForwarder) revert NotCREForwarder();
-        if (authorizedWorkflowId != bytes32(0)) {
+        if (msg.sender != creForwarder && msg.sender != address(this)) revert NotCREForwarder();
+        if (msg.sender == creForwarder && authorizedWorkflowId != bytes32(0)) {
             bytes32 workflowId = abi.decode(creReport[:32], (bytes32));
             if (workflowId != authorizedWorkflowId) revert UnauthorizedWorkflow();
         }
@@ -187,6 +190,28 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
         pendingMarketKeys.push(key);
 
         emit MarketRegistered(key, msg.sender, marketId, question, options, deadline, msg.value);
+    }
+
+    // ============ Keystone Forwarder Receiver ============
+
+    /// @notice Receives CRE reports routed through the Keystone Forwarder.
+    ///         The Forwarder calls onReport(metadata, payload) where payload is
+    ///         the ABI-encoded function call (selector + args) that the CRE workflow
+    ///         originally submitted via runtime.report().
+    /// @param metadata CRE report metadata (first 32 bytes = workflow ID)
+    /// @param payload The ABI-encoded function call to dispatch
+    function onReport(bytes calldata metadata, bytes calldata payload) external {
+        if (msg.sender != creForwarder) revert NotCREForwarder();
+        if (authorizedWorkflowId != bytes32(0) && metadata.length >= 32) {
+            bytes32 workflowId = abi.decode(metadata[:32], (bytes32));
+            if (workflowId != authorizedWorkflowId) revert UnauthorizedWorkflow();
+        }
+        // Dispatch: self-call with the payload (onlyCRE accepts msg.sender == address(this))
+        (bool success, bytes memory returnData) = address(this).call(payload);
+        if (!success) {
+            // Bubble up the revert reason
+            assembly { revert(add(returnData, 32), mload(returnData)) }
+        }
     }
 
     // ============ CRE-Only Functions ============
