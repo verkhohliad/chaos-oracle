@@ -38,7 +38,7 @@ ChaosOracle is a **plug-and-play settlement layer** for prediction markets. Inst
 
 | Component | Role |
 |-----------|------|
-| **Chainlink CRE** | Orchestration - triggers studio creation & closeEpoch |
+| **Chainlink CRE** | Orchestration - triggers studio creation & settlement (after EpochClosed) |
 | **ChaosChain** | Verification - workers research, verifiers audit, consensus + rewards |
 | **ERC-8004** | Identity - portable on-chain reputation for agents |
 | **Your Prediction Market** | Business logic - create markets, handle bets, payouts |
@@ -77,14 +77,8 @@ ChaosOracle is a **plug-and-play settlement layer** for prediction markets. Inst
 |   TRIGGER 1: Cron (every 5 min)                                      |
 |     -> Check deadlines -> Create studios for ready markets            |
 |                                                                       |
-|   TRIGGER 2: LogTrigger on StudioScoresSubmitted                     |
-|     -> Check canClose() -> If ready, call closeStudioEpoch()         |
-|                                                                       |
-|   TRIGGER 3: Cron (every 5 min) - Backup                            |
-|     -> Check all studios -> Close any that are ready                 |
-|                                                                       |
-|   TRIGGER 4: LogTrigger on MarketRegistered                          |
-|     -> Monitoring/logging only                                        |
+|   TRIGGER 2: LogTrigger on EpochClosed (RewardsDistributor)          |
+|     -> Read finalized scores -> Fetch evidence -> settleWithOutcome()|
 |                                                                       |
 +----------------------------------+------------------------------------+
                                    | creates & manages
@@ -101,14 +95,16 @@ ChaosOracle is a **plug-and-play settlement layer** for prediction markets. Inst
 |   Verifiers:                                                          |
 |     - Stake tokens to participate                                     |
 |     - Audit worker submissions                                        |
-|     - Submit scores [accuracy, evidence, diversity, reasoning]       |
-|     - Scores trigger StudioScoresSubmitted event via Registry        |
+|     - Submit scores (9 dimensions: 5 universal PoA + 4 prediction)  |
 |                                                                       |
-|   closeEpoch() (only callable by CRE via Registry):                  |
-|     - Calculate consensus outcome (weighted by verifier scores)      |
+|   closeEpoch() (called by Gateway/admin on RewardsDistributor):      |
+|     - Finalize per-worker quality scores on-chain                    |
 |     - Distribute rewards (correct workers win, wrong workers slashed)|
-|     - Call predictionMarket.onSettlement()                            |
-|     - Publish reputation to ERC-8004                                  |
+|     - Emit EpochClosed event -> triggers CRE settlement              |
+|                                                                       |
+|   settleWithOutcome() (called by CRE after EpochClosed):             |
+|     - Read finalized scores, fetch evidence, compute consensus       |
+|     - Call predictionMarket.onSettlement(outcome, proofHash)          |
 |                                                                       |
 +-----------------------------------------------------------------------+
 ```
@@ -139,29 +135,21 @@ modifier onlyCRE(bytes calldata creReport) {
 function createStudioForMarket(bytes32 key, bytes calldata creReport)
     external onlyCRE(creReport) { ... }
 
-function closeStudioEpoch(address studio, bytes calldata creReport)
+function settleWithOutcome(address studio, uint8 outcome, bytes32 proofHash, bytes calldata creReport)
     external onlyCRE(creReport) { ... }
 ```
 
 ### 2. Event Aggregation (Registry as Hub)
 
-Studios emit events to Registry, CRE listens to single address:
+CRE listens to the RewardsDistributor contract for the `EpochClosed` event:
 
 ```solidity
-// PredictionSettlementLogic.sol (in Studio)
-function submitScores(...) external {
-    // ... scoring logic ...
-
-    // Notify registry (CRE listens to Registry, not individual studios)
-    registry.onScoresSubmitted(submissions.length, verifierScores.length);
-}
-
-// ChaosOracleRegistry.sol
-function onScoresSubmitted(uint256 totalSubmissions, uint256 totalScores) external {
-    require(isActiveStudio[msg.sender], "Unknown studio");
-
-    // CRE workflow listens to this event
-    emit StudioScoresSubmitted(msg.sender, studioToMarketKey[msg.sender], totalSubmissions, totalScores);
+// RewardsDistributor.sol
+function closeEpoch(address studio, uint64 epoch) external onlyOwner {
+    // ... finalize per-worker quality scores ...
+    // ... distribute rewards and slash wrong workers ...
+    emit EpochClosed(studio, epoch, totalWorkerRewards, totalValidatorRewards);
+    // CRE workflow listens to this event on RewardsDistributor
 }
 ```
 
@@ -169,7 +157,8 @@ function onScoresSubmitted(uint256 totalSubmissions, uint256 totalScores) extern
 
 ```
 PredictionMarket.onSettlement()  <- Only the Registry can call (onlyChaosOracleRegistry modifier)
-Studio.closeEpoch()              <- Only CRE can call (via Registry)
+Registry.settleWithOutcome()     <- Only CRE can call (onlyCRE modifier)
+RewardsDistributor.closeEpoch()  <- Only owner/admin can call (Gateway or deployer)
 ```
 
 ---
@@ -178,7 +167,7 @@ Studio.closeEpoch()              <- Only CRE can call (via Registry)
 
 ### Phase 1: Market Registration
 
-The prediction market calls `registerForSettlement{value: reward}(marketId, question, options, deadline)` on the Registry. The Registry stores the pending market and emits `MarketRegistered`. CRE Trigger 4 logs it for monitoring.
+The prediction market calls `registerForSettlement{value: reward}(marketId, question, options, deadline)` on the Registry. The Registry stores the pending market and emits `MarketRegistered`.
 
 ### Phase 2: Studio Creation (CRE Trigger 1 — Every 5 min Cron)
 
@@ -190,13 +179,17 @@ Worker agents discover the studio, call `registerAsWorker{value: stake}()`, then
 
 ### Phase 4: Verifier Scoring
 
-Verifier agents discover worker submissions, call `registerAsVerifier{value: stake}()`, fetch evidence from IPFS/Arweave, audit it (LLM or heuristic), and submit scores via `submitScores(worker, [accuracy, evidenceQuality, sourceDiversity, reasoningDepth])`. Each verifier scores **all** workers (e.g. 3 verifiers x 3 workers = 9 score submissions). Each score submission notifies the Registry via `onScoresSubmitted()`, which emits `StudioScoresSubmitted` for CRE.
+Verifier agents discover worker submissions, call `registerAsVerifier{value: stake}()`, fetch evidence from IPFS/Arweave, audit it (LLM or heuristic), and submit score vectors (9 dimensions: 5 universal PoA + 4 prediction-specific). Each verifier scores **all** workers (e.g. 3 verifiers x 3 workers = 9 score submissions).
 
-### Phase 5: Settlement (CRE Trigger 2 — On Scores Submitted)
+### Phase 5: Close Epoch (Gateway/Admin)
 
-CRE checks `canClose()` on the studio. If enough workers and verifiers have participated, CRE calls `closeStudioEpoch(studio, proof)` via the Registry. The studio computes weighted consensus, distributes rewards, slashes wrong workers, and calls `predictionMarket.onSettlement(marketId, outcome, proofHash)`.
+The ChaosChain Gateway (or admin) calls `RewardsDistributor.closeEpoch(studio, epoch)`. This finalizes per-worker quality scores on-chain, distributes rewards, slashes wrong workers, and emits `EpochClosed(studio, epoch, totalWorkerRewards, totalValidatorRewards)`.
 
-### Phase 6: User Claims
+### Phase 6: Settlement (CRE Trigger 2 — On EpochClosed)
+
+CRE detects the `EpochClosed` event on RewardsDistributor. The `onEpochClosed` handler reads finalized quality scores via `getConsensusResult()`, fetches evidence from IPFS (sandbox) or Arweave (production) to extract each worker's predicted outcome, computes score-weighted consensus (outcome weighted by average quality score), and calls `settleWithOutcome(studio, outcome, proofHash, creReport)` via the Registry. The Registry calls `predictionMarket.onSettlement(marketId, outcome, proofHash)`.
+
+### Phase 7: User Claims
 
 Users call `claimWinnings(marketId)` on the prediction market. The market checks the settled outcome and transfers winnings. Users can verify settlement by fetching evidence CIDs from IPFS/Arweave to see the full AI reasoning chain.
 
@@ -227,11 +220,7 @@ function registerForSettlement(
 
 // CRE calls these (protected by onlyCRE modifier)
 function createStudioForMarket(bytes32 key, bytes calldata creReport) external;
-function closeStudioEpoch(address studio, bytes calldata creReport) external;
-
-// Studios call these to aggregate events
-function onScoresSubmitted(uint256 totalSubmissions, uint256 totalScores) external;
-function onStudioSettled(uint8 outcome, bytes32 proofHash) external;
+function settleWithOutcome(address studio, uint8 outcome, bytes32 proofHash, bytes calldata creReport) external;
 ```
 
 #### PredictionSettlementLogic (Studio)
@@ -244,11 +233,8 @@ function registerAsVerifier() external payable;
 // Worker submits research
 function submitWork(uint8 outcome, string calldata evidenceCID) external;
 
-// Verifier scores work
-function submitScores(address worker, uint8[4] calldata scores) external;
-
-// CRE closes epoch (via Registry)
-function closeEpoch() external; // onlyCRE via Registry
+// Verifier scores work (9 dimensions, truncated to 5 on-chain)
+function submitScoreVector(bytes32 dataHash, uint8[] calldata scores) external;
 ```
 
 #### IChaosOracleSettleable (Your Contract)
@@ -276,9 +262,7 @@ interface IChaosOracleSettleable {
 | # | Trigger Type | Schedule/Event | Action |
 |---|--------------|----------------|--------|
 | 1 | Cron | Every 5 min | Check deadlines -> Create studios |
-| 2 | LogTrigger | `StudioScoresSubmitted` | Check `canClose()` -> Close epoch |
-| 3 | Cron | Every 5 min | Backup check all studios |
-| 4 | LogTrigger | `MarketRegistered` | Monitoring/logging |
+| 2 | LogTrigger | `EpochClosed` on RewardsDistributor | Read finalized scores -> settleWithOutcome() |
 
 ### Workflow Code Structure
 
@@ -295,20 +279,10 @@ const initWorkflow = (config: Config) => {
             cronCapability.trigger({ schedule: "*/5 * * * *" }),
             onCheckDeadlines
         ),
-        // TRIGGER 2: Close epochs when ready
+        // TRIGGER 2: Settle on EpochClosed (LogTrigger on RewardsDistributor)
         handler(
-            evmClient.logTrigger({ addresses: [config.registryAddress] }),
-            onStudioScoresSubmitted
-        ),
-        // TRIGGER 3: Backup cron
-        handler(
-            cronCapability.trigger({ schedule: "*/5 * * * *" }),
-            onCheckClosableStudios
-        ),
-        // TRIGGER 4: Monitor registrations
-        handler(
-            evmClient.logTrigger({ addresses: [config.registryAddress] }),
-            onMarketRegistered
+            evmClient.logTrigger({ addresses: [config.rewardsDistributorAddress] }),
+            onEpochClosed
         ),
     ]
 }
@@ -517,7 +491,7 @@ def run_verifier(studio_address: str, data_hash, worker_address: str):
 | # | Action |
 |---|--------|
 | 5 | `cd cre-workflow/settlement-workflow && bun install` |
-| 6 | Edit `config.staging.json` -> set `registryAddress` to your Registry |
+| 6 | Edit `config.staging.json` -> set `registryAddress` and `rewardsDistributorAddress` |
 | 7 | `cd .. && cp .env.example .env` -> fill `CRE_ETH_PRIVATE_KEY` |
 | 8 | `cre login && cre account link-key` |
 | 9 | Simulate: `cd settlement-workflow && cre workflow simulate .` |
@@ -557,7 +531,7 @@ def run_verifier(studio_address: str, data_hash, worker_address: str):
 | 23 | CRE Trigger 1 fires -> creates ChaosChain Studio automatically |
 | 24 | Worker agents discover studio -> research -> submit evidence |
 | 25 | Verifier agents audit evidence -> submit scores |
-| 26 | CRE Trigger 2/3 fires -> `settleWithOutcome()` -> consensus -> settlement |
+| 26 | CRE Trigger 2 fires (EpochClosed) -> reads finalized scores -> `settleWithOutcome()` |
 | 27 | `./check_settlement.sh` — verify outcome |
 
 ### Evidence Storage

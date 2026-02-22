@@ -30,7 +30,7 @@ Your Market  --->  ChaosOracle Registry  --->  CRE Workflow  --->  ChaosChain St
 
 ## Quick Start — Local Sandbox
 
-Run the full E2E lifecycle in Docker (13 containers: Anvil fork + Gateway + IPFS + Otterscan + PostgreSQL + 3 workers + 3 verifiers + deployer + orchestrator):
+Run the full E2E lifecycle in Docker (14 containers: Anvil fork + Gateway + IPFS + Otterscan + PostgreSQL + cre-runner + 3 workers + 3 verifiers + deployer + orchestrator):
 
 ```bash
 # Prerequisites: Docker, Docker Compose, a Sepolia RPC URL (Alchemy/Infura free tier)
@@ -55,7 +55,7 @@ See [sandbox/README.md](./sandbox/README.md) for full instructions, expected out
 contracts/       Solidity contracts (Registry, SettlementLogic, ExampleMarket)
 agents/          Python worker & verifier agents
 cre-workflow/    Chainlink CRE settlement workflow (TypeScript)
-sandbox/         Full local sandbox (13 Docker services)
+sandbox/         Full local sandbox (14 Docker services)
 abis/            Contract ABIs (generated from forge build)
 scripts/         Helper scripts (ABI export, etc.)
 ```
@@ -79,10 +79,10 @@ scripts/         Helper scripts (ABI export, etc.)
 
 | Contract | Address |
 |----------|---------|
-| ChaosOracleRegistry | _coming soon_ |
-| PredictionSettlementLogic | _coming soon_ |
-| ExamplePredictionMarket | _coming soon_ |
-| CRE Workflow ID | _coming soon_ |
+| ChaosOracleRegistry | `0x6f1911A35fac05c0443c2a8E2d83d5d3A055764E` |
+| PredictionSettlementLogic | `0xc0c861dc81067738e03Ebe7a4d55781345aB5fae` |
+| ExamplePredictionMarket | `0xedE31BaF7E3fe79f8AbA25022494fBd92E01cC87` |
+| CRE Workflow ID | _TBD after DON deployment_ |
 
 ## Frontend
 
@@ -102,7 +102,7 @@ Full technical documentation — architecture diagrams, security model, complete
 
 | Component | Technology |
 |-----------|------------|
-| Smart Contracts | Solidity 0.8.19, Foundry |
+| Smart Contracts | Solidity 0.8.24, Foundry |
 | AI Agents | Python 3.12, web3.py, aiohttp, structlog |
 | CRE Workflow | TypeScript, Chainlink CRE SDK |
 | Evidence Storage | IPFS (sandbox) / Arweave (production) |
@@ -120,4 +120,4 @@ forge test --skip ForkIntegration        # unit + integration tests
 forge test --match-contract ForkIntegrationTest --fork-url $SEPOLIA_RPC -vvv  # fork tests
 ```
 
-86 tests across 6 suites — see [contracts/README.md](./contracts/README.md) for details.
+90 tests across 7 suites — see [contracts/README.md](./contracts/README.md) for details.
