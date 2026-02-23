@@ -214,7 +214,8 @@ class ArweaveClient:
         ----------
         cid:
             Content identifier — IPFS CID (starts with ``Qm`` or ``bafy``),
-            Arweave TX ID (43-char base64url), or stub CID (64-char hex).
+            Arweave TX ID (43-char base64url), ``ar://`` URI, or stub CID
+            (64-char hex).
 
         Returns
         -------
@@ -226,6 +227,10 @@ class ArweaveClient:
         RuntimeError
             If the fetch fails or the response is not valid JSON.
         """
+        # Strip ar:// protocol prefix (Gateway stores evidenceUri as "ar://{txId}")
+        if cid.startswith("ar://"):
+            cid = cid[len("ar://"):]
+
         # IPFS CIDs (CIDv0 starts with "Qm", CIDv1 starts with "bafy")
         if cid.startswith("Qm") or cid.startswith("bafy"):
             return await self._fetch_from_ipfs(cid)
@@ -263,7 +268,10 @@ class ArweaveClient:
                             f"Arweave fetch failed for {cid}: HTTP {resp.status}"
                         )
 
-                    data: dict[str, Any] = await resp.json()
+                    # Arweave gateway may return non-standard Content-Type
+                    # after 302 redirect to per-TX subdomain.  Disable strict
+                    # content-type check so aiohttp parses JSON regardless.
+                    data: dict[str, Any] = await resp.json(content_type=None)
                     logger.info("arweave_client.fetch.done", cid=cid)
                     return data
         except aiohttp.ClientError as exc:

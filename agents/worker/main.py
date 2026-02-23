@@ -2,8 +2,9 @@
 ChaosOracle Worker Agent -- autonomous event loop.
 
 Polls the ChaosOracleRegistry for active studios, researches each market
-question, builds evidence packages, uploads them to Arweave, and submits
-the predicted outcome on-chain via the ChaosChain Gateway.
+question, builds evidence packages, and submits the predicted outcome
+on-chain via the ChaosChain Gateway (which handles evidence upload to
+Arweave and on-chain transactions).
 
 Usage::
 
@@ -13,13 +14,14 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import json
 import signal
 import sys
+from pathlib import Path
 from typing import NoReturn
 
 import structlog
 
-from shared.arweave_client import ArweaveClient
 from shared.registry_reader import RegistryReader
 from shared.sdk_client import create_sdk_client
 from worker.config import WorkerConfig
@@ -105,6 +107,7 @@ async def run(config: WorkerConfig) -> NoReturn:
     registry = RegistryReader(
         rpc_url=config.sepolia_rpc_url,
         registry_address=config.chaos_oracle_registry_address,
+        rewards_distributor_address=getattr(config, "rewards_distributor_address", None),
     )
 
     researcher = Researcher(
@@ -115,20 +118,29 @@ async def run(config: WorkerConfig) -> NoReturn:
 
     evidence_builder = EvidenceBuilder()
 
-    arweave = ArweaveClient(
-        wallet_path=config.arweave_wallet_path or None,
-    )
-
     # -- Identity registration -----------------------------------------------
     agent_id = await sdk_client.auto_register()
     logger.info("worker.identity_ready", agent_id=agent_id, wallet=sdk_client.wallet_address)
 
     # -- State ---------------------------------------------------------------
-    participated_studios: set[str] = set()
+    participated_studios: set[str] = set()  # Studios we've successfully submitted to
+    attempted_studios: set[str] = set()  # Studios we've attempted (even on error)
     pending_withdrawal: set[str] = set()
     withdrawn_studios: set[str] = set()
     withdrawal_attempts: dict[str, int] = {}  # studio -> attempt count
     MAX_WITHDRAWAL_ATTEMPTS = 12  # ~60s at 5s poll interval
+    MAX_STUDIO_ATTEMPTS = 2  # Max retries per studio before giving up
+    studio_attempt_counts: dict[str, int] = {}  # studio -> attempt count
+    # Track submitted dataHashes to verify RewardsDistributor registration.
+    # Persisted to disk so container restarts don't lose hash knowledge.
+    _submitted_hashes_path = Path("/app/cache/submitted_hashes.json")
+    submitted_hashes: dict[str, str] = {}  # studio_address -> data_hash_hex
+    try:
+        if _submitted_hashes_path.exists():
+            submitted_hashes = json.loads(_submitted_hashes_path.read_text())
+            logger.info("worker.loaded_submitted_hashes", count=len(submitted_hashes))
+    except Exception:
+        logger.warning("worker.submitted_hashes_load_error", path=str(_submitted_hashes_path))
 
     # -- Poll loop -----------------------------------------------------------
     logger.info("worker.loop.start", poll_interval=config.poll_interval_seconds)
@@ -140,6 +152,17 @@ async def run(config: WorkerConfig) -> NoReturn:
 
             for studio_address in studios:
                 if studio_address in participated_studios:
+                    continue
+
+                # Check if we've exhausted retries for this studio
+                attempts = studio_attempt_counts.get(studio_address, 0)
+                if attempts >= MAX_STUDIO_ATTEMPTS:
+                    logger.info(
+                        "worker.studio_max_attempts",
+                        studio=studio_address,
+                        attempts=attempts,
+                    )
+                    participated_studios.add(studio_address)
                     continue
 
                 logger.info("worker.new_studio", studio=studio_address)
@@ -155,10 +178,26 @@ async def run(config: WorkerConfig) -> NoReturn:
                         participated_studios.add(studio_address)
                         continue
 
-                    # 2. Research the question
+                    # 2. Check if we already submitted work on-chain AND it's
+                    #    registered in RewardsDistributor (full idempotency).
+                    already_submitted = registry.has_worker_fully_submitted(
+                        studio_address=studio_address,
+                        worker_address=sdk_client.wallet_address,
+                        data_hash_hex=submitted_hashes.get(studio_address),
+                    )
+                    if already_submitted:
+                        logger.info(
+                            "worker.already_submitted_onchain",
+                            studio=studio_address,
+                        )
+                        participated_studios.add(studio_address)
+                        pending_withdrawal.add(studio_address)
+                        continue
+
+                    # 3. Research the question
                     result = await researcher.research(details.question, details.options)
 
-                    # 3. Build evidence package
+                    # 4. Build evidence package
                     evidence_package = evidence_builder.build(
                         question=details.question,
                         outcome=result.outcome_index,
@@ -169,22 +208,31 @@ async def run(config: WorkerConfig) -> NoReturn:
                         web_search_queries=result.web_search_queries,
                     )
 
-                    # 4. Upload to Arweave
-                    evidence_cid = await arweave.upload_evidence(evidence_package)
                     logger.info(
-                        "worker.evidence_uploaded",
-                        cid=evidence_cid,
+                        "worker.evidence_built",
                         source_count=len(evidence_package.get("sources", [])),
                         search_query_count=len(evidence_package.get("web_search_queries", [])),
                         reasoning_summary_preview=evidence_package.get("reasoning_summary", "")[:200],
                     )
 
-                    # 5. Submit work on-chain
+                    # 5. Submit work via Gateway (handles Arweave upload + on-chain tx)
+                    evidence_bytes = json.dumps(evidence_package, sort_keys=True).encode()
                     await sdk_client.submit_work(
                         studio_address=studio_address,
                         outcome=result.outcome_index,
-                        evidence_cid=evidence_cid,
+                        evidence_content=evidence_bytes,
                     )
+
+                    # Track dataHash for RewardsDistributor verification on next poll
+                    from web3 import Web3 as _W3
+                    dh = _W3.keccak(evidence_bytes)
+                    submitted_hashes[studio_address] = dh.hex()
+                    # Persist to disk so restarts don't lose hash knowledge
+                    try:
+                        _submitted_hashes_path.parent.mkdir(parents=True, exist_ok=True)
+                        _submitted_hashes_path.write_text(json.dumps(submitted_hashes))
+                    except Exception:
+                        logger.warning("worker.submitted_hashes_save_error")
 
                     participated_studios.add(studio_address)
                     pending_withdrawal.add(studio_address)
@@ -196,8 +244,13 @@ async def run(config: WorkerConfig) -> NoReturn:
                     )
 
                 except Exception:
-                    logger.exception("worker.studio_processing_error", studio=studio_address)
-                    # Do not add to participated so we retry next cycle.
+                    studio_attempt_counts[studio_address] = attempts + 1
+                    logger.exception(
+                        "worker.studio_processing_error",
+                        studio=studio_address,
+                        attempt=attempts + 1,
+                        max_attempts=MAX_STUDIO_ATTEMPTS,
+                    )
 
             # -- Withdraw from settled studios ----------------------------------
             # get_active_studios() only returns unsettled studios, so once a

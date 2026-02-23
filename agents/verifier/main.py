@@ -102,6 +102,7 @@ async def run(config: VerifierConfig) -> NoReturn:
     registry = RegistryReader(
         rpc_url=config.sepolia_rpc_url,
         registry_address=config.chaos_oracle_registry_address,
+        rewards_distributor_address=getattr(config, "rewards_distributor_address", None),
     )
 
     auditor = Auditor(
@@ -119,6 +120,10 @@ async def run(config: VerifierConfig) -> NoReturn:
     # -- State ---------------------------------------------------------------
     # Tracks (studio_address, worker_address) pairs we have already scored.
     scored_pairs: set[tuple[str, str]] = set()
+
+    # Tracks (studio_address, worker_address) pairs that failed scoring.
+    failed_pairs: dict[tuple[str, str], int] = {}  # pair -> attempt count
+    MAX_SCORE_ATTEMPTS = 2  # Max retries per (studio, worker) pair
 
     # Studios where we have already registered as a verifier.
     registered_studios: set[str] = set()
@@ -163,12 +168,13 @@ async def run(config: VerifierConfig) -> NoReturn:
                         if pair in scored_pairs:
                             continue
 
+                        # Check if we've exhausted retries for this pair
+                        pair_attempts = failed_pairs.get(pair, 0)
+                        if pair_attempts >= MAX_SCORE_ATTEMPTS:
+                            scored_pairs.add(pair)  # Give up
+                            continue
+
                         # Skip submissions with no evidence CID yet.
-                        # The worker writes to evidence_map.json AFTER
-                        # the Gateway workflow completes, so there's a
-                        # short window where the on-chain WorkSubmitted
-                        # event exists but the evidence CID isn't
-                        # available.  We'll pick it up on the next poll.
                         if not submission.evidence_cid:
                             logger.debug(
                                 "verifier.skipping_no_evidence",
@@ -236,12 +242,14 @@ async def run(config: VerifierConfig) -> NoReturn:
                             )
 
                         except Exception:
+                            failed_pairs[pair] = pair_attempts + 1
                             logger.exception(
                                 "verifier.submission_audit_error",
                                 studio=studio_address,
                                 worker=submission.worker_address,
+                                attempt=pair_attempts + 1,
+                                max_attempts=MAX_SCORE_ATTEMPTS,
                             )
-                            # Do not add to scored_pairs -- retry next cycle.
 
                 except Exception:
                     logger.exception("verifier.studio_processing_error", studio=studio_address)

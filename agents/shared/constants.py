@@ -74,6 +74,11 @@ REPUTATION_CONTRACT_ADDRESS: str = os.environ.get(
     "0x0000000000000000000000000000000000000000",  # placeholder - set after deployment
 )
 
+REWARDS_DISTRIBUTOR_ADDRESS: str = os.environ.get(
+    "REWARDS_DISTRIBUTOR_ADDRESS",
+    "",  # optional — agents degrade gracefully without it
+)
+
 # ---------------------------------------------------------------------------
 # Stake amounts (in wei)
 # ---------------------------------------------------------------------------
@@ -94,6 +99,33 @@ PREDICTION_SETTLEMENT_LOGIC_ABI: list[dict] = _load_abi("PredictionSettlementLog
 # The StudioProxy contract has a withdraw() function that transfers
 # _withdrawable[msg.sender] to the caller.  This is used by agents to
 # reclaim stakes and rewards after a studio epoch closes.
+
+# ---------------------------------------------------------------------------
+# RewardsDistributor ABI (inline — view functions for agent checks)
+# ---------------------------------------------------------------------------
+# Used by agents to verify work/validator registration status.
+# Only includes the read-only functions agents need; writes are handled
+# by the Gateway (which has onlyOwner access).
+
+REWARDS_DISTRIBUTOR_ABI: list[dict] = [
+    {
+        "inputs": [
+            {"name": "studio", "type": "address"},
+            {"name": "epoch", "type": "uint64"},
+        ],
+        "name": "getEpochWork",
+        "outputs": [{"name": "workHashes", "type": "bytes32[]"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [{"name": "dataHash", "type": "bytes32"}],
+        "name": "getWorkValidators",
+        "outputs": [{"name": "validators", "type": "address[]"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
 
 STUDIO_PROXY_WITHDRAW_ABI: list[dict] = [
     {

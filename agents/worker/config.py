@@ -78,6 +78,10 @@ class WorkerConfig(BaseSettings):
         default="0x0000000000000000000000000000000000000000",
         description="Deployed ChaosOracleRegistry address on Sepolia.",
     )
+    rewards_distributor_address: str = Field(
+        default="",
+        description="Deployed RewardsDistributor address. Optional — degrades gracefully.",
+    )
 
     # ---- Arweave ----
     arweave_wallet_path: str = Field(

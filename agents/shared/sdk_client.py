@@ -9,11 +9,8 @@ Adapted for **chaoschain-sdk v0.4.1** API.
 
 from __future__ import annotations
 
-import fcntl
 import json
-import os
 import tempfile
-import threading
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -34,18 +31,6 @@ from shared.constants import (
 )
 
 logger = structlog.get_logger(__name__)
-
-# File used to cache agent IDs across restarts so we avoid redundant
-# on-chain identity registration transactions.
-_AGENT_ID_CACHE_PATH = Path("chaoschain_agent_ids.json")
-
-# Shared evidence CID mapping (Docker shared volume).
-# Workers write {dataHash: evidenceCID} here after submitting work.
-# Verifiers read from this file to resolve evidence CIDs when
-# getEvidenceCID() returns empty (submitWork single-agent doesn't store on-chain).
-_EVIDENCE_MAP_PATH = Path(os.environ.get("SHARED_DIR", "/shared")) / "evidence_map.json"
-_EVIDENCE_MAP_LOCK_PATH = _EVIDENCE_MAP_PATH.parent / "evidence_map.lock"
-_EVIDENCE_MAP_LOCK = threading.Lock()  # intra-process; fcntl.flock handles cross-process
 
 # SDK role integers (StudioProxy registerAgent uses uint8 role codes)
 _ROLE_WORKER = 1
@@ -130,6 +115,15 @@ class ChaosOracleSDKClient:
             gateway_url=gateway_url,
         )
 
+        # Redirect ERC-8004 agent ID cache to /app/cache/ so Docker volumes
+        # persist it across container rebuilds (avoids minting a new NFT each
+        # time).  The SDK defaults to os.getcwd() which is ephemeral.
+        cache_dir = Path("/app/cache")
+        if cache_dir.is_dir():
+            cache_path = str(cache_dir / "chaoschain_agent_ids.json")
+            self.sdk.chaos_agent._get_cache_file_path = lambda: cache_path  # type: ignore[assignment]
+            logger.debug("sdk_client.cache_path_override", path=cache_path)
+
         # Convenience aliases
         self.gateway: GatewayClient | None = self.sdk.gateway
         self.agent_id: int | None = None
@@ -152,43 +146,111 @@ class ChaosOracleSDKClient:
         return self.sdk.chaos_agent.w3
 
     # ------------------------------------------------------------------
+    # Studio registration check
+    # ------------------------------------------------------------------
+
+    def _is_registered_in_studio(self, studio_address: str) -> bool:
+        """Check if this agent is already registered in a StudioProxy.
+
+        Uses ``getEscrowBalance(agent) > 0`` as the indicator — registerAgent()
+        requires ``msg.value > 0`` so a non-zero escrow means the agent has
+        already registered and staked.
+        """
+        try:
+            from web3 import Web3
+
+            proxy = self.w3.eth.contract(
+                address=Web3.to_checksum_address(studio_address),
+                abi=STUDIO_PROXY_WITHDRAW_ABI,
+            )
+            balance = proxy.functions.getEscrowBalance(
+                Web3.to_checksum_address(self.wallet_address)
+            ).call()
+            return balance > 0
+        except Exception:
+            logger.debug(
+                "sdk_client.registration_check_failed",
+                studio=studio_address,
+                wallet=self.wallet_address,
+            )
+            return False  # On error, proceed with registration attempt
+
+    # ------------------------------------------------------------------
     # ERC-8004 identity
     # ------------------------------------------------------------------
 
     async def auto_register(self) -> int:
         """Ensure the agent has an ERC-8004 on-chain identity.
 
-        If the wallet already holds an agent ID (checked via the SDK and
-        a local JSON cache), registration is skipped.  Otherwise a new
-        identity token is minted on-chain.
+        Uses the SDK's built-in identity lookup (with its own cache in
+        ``chaos_agent.py``).  If no identity exists, mints a new one.
 
         Returns
         -------
         int
             The agent's on-chain ERC-8004 token ID.
         """
-        # 1. Check local cache first
-        cached_id = self._load_cached_agent_id()
-        if cached_id is not None:
-            logger.info("sdk_client.identity_cached", agent_id=cached_id)
-            self.agent_id = cached_id
-            return cached_id
-
-        # 2. Check on-chain via SDK
+        # 1. Check on-chain via SDK (SDK has its own cache layer)
         on_chain_id = self.sdk.get_agent_id()
         if on_chain_id:
-            logger.info("sdk_client.identity_on_chain", agent_id=on_chain_id)
-            self._save_cached_agent_id(on_chain_id)
+            logger.info("sdk_client.identity_found", agent_id=on_chain_id)
             self.agent_id = on_chain_id
+            self._verify_identity_ownership(on_chain_id)
+            # Ensure cache is populated (SDK register_agent doesn't always save).
+            self._save_agent_id_cache(on_chain_id)
             return on_chain_id
 
-        # 3. Register new identity
+        # 2. Register new identity
         token_uri = f"https://{self._agent_domain}/.well-known/agent.json"
         agent_id, _tx = self.sdk.register_identity(token_uri=token_uri)
         logger.info("sdk_client.identity_registered", agent_id=agent_id, token_uri=token_uri)
-        self._save_cached_agent_id(agent_id)
         self.agent_id = agent_id
+        # Explicitly save to cache — the SDK's register_agent() doesn't always
+        # call _save_agent_id_to_cache() on the success path.
+        self._save_agent_id_cache(agent_id)
         return agent_id
+
+    def _save_agent_id_cache(self, agent_id: int) -> None:
+        """Persist agent ID via the SDK's own cache mechanism.
+
+        This ensures the cache file is written even when the SDK's
+        ``register_agent()`` path skips the save.
+        """
+        try:
+            self.sdk.chaos_agent._save_agent_id_to_cache(agent_id)
+            logger.debug("sdk_client.cache_saved", agent_id=agent_id)
+        except Exception as exc:
+            logger.warning("sdk_client.cache_save_failed", error=str(exc))
+
+    def _verify_identity_ownership(self, agent_id: int) -> None:
+        """Verify this wallet actually owns the given agent ID on-chain.
+
+        Raises :class:`RuntimeError` if the IdentityRegistry reports a
+        different owner — this catches stale SDK cache or Enumerable
+        iteration bugs before they cause an on-chain revert.
+        """
+        try:
+            identity_registry = self.sdk.chaos_agent.identity_registry
+            owner = identity_registry.functions.ownerOf(agent_id).call()
+            if owner.lower() != self.wallet_address.lower():
+                raise RuntimeError(
+                    f"Agent ID {agent_id} is owned by {owner}, not by "
+                    f"{self.wallet_address}. The SDK cache may be stale — "
+                    f"delete chaoschain_agent_ids.json and restart."
+                )
+            logger.debug(
+                "sdk_client.identity_ownership_verified",
+                agent_id=agent_id,
+                owner=owner,
+            )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "sdk_client.identity_ownership_check_failed",
+                agent_id=agent_id,
+                error=str(exc),
+            )
 
     # ------------------------------------------------------------------
     # Worker flow
@@ -198,9 +260,12 @@ class ChaosOracleSDKClient:
         self,
         studio_address: str,
         outcome: int,
-        evidence_cid: str,
+        evidence_content: bytes,
     ) -> dict[str, Any]:
         """Register as a worker (with stake) and submit work to the studio.
+
+        The Gateway handles: Arweave upload → StudioProxy.submitWork() →
+        RewardsDistributor.registerWork().
 
         Parameters
         ----------
@@ -208,8 +273,9 @@ class ChaosOracleSDKClient:
             The StudioProxy contract address.
         outcome:
             Predicted outcome index (0-based).
-        evidence_cid:
-            Arweave / IPFS content identifier pointing to the evidence package.
+        evidence_content:
+            Raw evidence bytes (JSON-encoded evidence package). The Gateway
+            uploads this to Arweave and stores the CID.
 
         Returns
         -------
@@ -220,47 +286,57 @@ class ChaosOracleSDKClient:
             "sdk_client.submit_work.start",
             studio=studio_address,
             outcome=outcome,
-            evidence_cid=evidence_cid,
+            evidence_size=len(evidence_content),
         )
 
         if self.agent_id is None:
             raise RuntimeError("Agent not registered — call auto_register() first.")
 
         # Register with studio as worker (includes staking).
-        # Tolerate "Already registered" — the worker may have registered
-        # in a prior run before the agent was restarted.  The contract's
-        # registerAgent checks `_agentIds[msg.sender] == 0` and reverts
-        # on duplicate registration for the same wallet.
-        try:
-            self.sdk.register_with_studio(
-                studio_address,
-                agent_id=self.agent_id,
-                role=_ROLE_WORKER,
-                stake_amount=WORKER_STAKE_WEI,
-            )
-            logger.info("sdk_client.worker_registered", studio=studio_address)
-        except Exception as exc:
-            exc_str = str(exc)
-            if "Already registered" in exc_str or "registration transaction failed" in exc_str:
-                logger.debug("sdk_client.worker_already_registered", studio=studio_address)
-            else:
-                raise
+        # Pre-flight check: skip if already registered (avoids wasted gas + gateway timeout).
+        if self._is_registered_in_studio(studio_address):
+            logger.info("sdk_client.worker_already_registered_onchain", studio=studio_address)
+        else:
+            try:
+                self.sdk.register_with_studio(
+                    studio_address,
+                    agent_id=self.agent_id,
+                    role=_ROLE_WORKER,
+                    stake_amount=WORKER_STAKE_WEI,
+                )
+                logger.info("sdk_client.worker_registered", studio=studio_address)
+            except Exception as exc:
+                exc_str = str(exc)
+                if "Already registered" in exc_str or "registration transaction failed" in exc_str:
+                    logger.debug("sdk_client.worker_already_registered", studio=studio_address)
+                else:
+                    raise
 
-        # Build data hash for gateway submission
-        evidence_payload_str = json.dumps(
-            {"outcome": outcome, "evidence_cid": evidence_cid},
-            sort_keys=True,
+        # Build DKG node and compute proper thread_root / evidence_root
+        from shared.dkg_client import DKGBuilder
+
+        dkg = DKGBuilder(
+            wallet_address=self.wallet_address,
+            private_key=self._private_key,
         )
-        data_hash: bytes = self.w3.keccak(text=evidence_payload_str)
 
-        # StudioProxy requires non-zero threadRoot and evidenceRoot
-        thread_root: bytes = self.w3.keccak(text=f"thread:{studio_address}:{evidence_cid}")
-        evidence_root: bytes = self.w3.keccak(text=f"evidence:{evidence_cid}")
+        data_hash: bytes = self.w3.keccak(evidence_content)
+        # Use data_hash hex as artifact_id so evidence_root is non-zero.
+        # The actual Arweave CID isn't known yet (gateway uploads later),
+        # but the contract just needs a non-zero Merkle root.
+        artifact_id = "0x" + data_hash.hex()
+        dkg.add_work_node(
+            evidence_content=evidence_content,
+            artifact_ids=[artifact_id],
+        )
 
-        # Build evidence content bytes (the Gateway uploads to Arweave/IPFS)
-        evidence_content = evidence_payload_str.encode()
+        thread_root: bytes = dkg.compute_thread_root()
+        evidence_root: bytes = dkg.compute_evidence_root()
 
-        # submit_work_via_gateway returns a WorkflowStatus (dataclass)
+        # submit_work_via_gateway returns a WorkflowStatus (dataclass).
+        # The SDK passes signer_address=self.wallet_address (agent's key) to Gateway.
+        # Gateway uses that signer for StudioProxy.submitWork() and the default
+        # signer (deployer) for RewardsDistributor.registerWork().
         workflow_status = self.sdk.submit_work_via_gateway(
             studio_address=studio_address,
             epoch=1,
@@ -277,13 +353,6 @@ class ChaosOracleSDKClient:
             studio=studio_address,
             state=state_str,
         )
-
-        # Write evidence CID mapping to shared volume so verifiers can resolve it.
-        # submitWork (single-agent) doesn't store the CID on-chain, so we persist
-        # the mapping {dataHash: evidenceCID} in a shared JSON file.
-        if state_str == "COMPLETED" and evidence_cid:
-            data_hash_hex = data_hash.hex() if hasattr(data_hash, "hex") else str(data_hash)
-            self._write_evidence_mapping(data_hash_hex, evidence_cid)
 
         return {"state": state_str, "id": workflow_status.id}
 
@@ -329,25 +398,26 @@ class ChaosOracleSDKClient:
             raise RuntimeError("Agent not registered — call auto_register() first.")
 
         # Register with studio as verifier (includes staking).
-        # Tolerate "Already registered" — the verifier may score multiple workers
-        # in the same studio, but only needs to register once.
-        # The SDK raises a generic ContractError("Studio registration transaction
-        # failed") when the tx reverts, without including the revert reason.
-        # We also tolerate that generic error after the first successful registration.
-        try:
-            self.sdk.register_with_studio(
-                studio_address,
-                agent_id=self.agent_id,
-                role=_ROLE_VERIFIER,
-                stake_amount=VERIFIER_STAKE_WEI,
-            )
-            logger.info("sdk_client.verifier_registered", studio=studio_address)
-        except Exception as exc:
-            exc_str = str(exc)
-            if "Already registered" in exc_str or "registration transaction failed" in exc_str:
-                logger.debug("sdk_client.verifier_already_registered", studio=studio_address)
-            else:
-                raise
+        # Pre-flight check: skip if already registered (avoids wasted gas + gateway timeout).
+        # The verifier may score multiple workers in the same studio but only
+        # needs to register once.
+        if self._is_registered_in_studio(studio_address):
+            logger.info("sdk_client.verifier_already_registered_onchain", studio=studio_address)
+        else:
+            try:
+                self.sdk.register_with_studio(
+                    studio_address,
+                    agent_id=self.agent_id,
+                    role=_ROLE_VERIFIER,
+                    stake_amount=VERIFIER_STAKE_WEI,
+                )
+                logger.info("sdk_client.verifier_registered", studio=studio_address)
+            except Exception as exc:
+                exc_str = str(exc)
+                if "Already registered" in exc_str or "registration transaction failed" in exc_str:
+                    logger.debug("sdk_client.verifier_already_registered", studio=studio_address)
+                else:
+                    raise
 
         # Normalise data_hash to bytes for the SDK.
         if data_hash is None:
@@ -520,101 +590,6 @@ class ChaosOracleSDKClient:
             )
             return False
 
-    # ------------------------------------------------------------------
-    # Evidence CID mapping (shared volume)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _write_evidence_mapping(data_hash_hex: str, evidence_cid: str) -> None:
-        """Append a ``{dataHash: evidenceCID}`` entry to the shared evidence map.
-
-        Uses ``fcntl.flock()`` for cross-process mutual exclusion (works
-        across Docker containers sharing the same volume) and atomic
-        rename for write safety.  The ``threading.Lock`` is kept as
-        defence-in-depth for intra-process thread safety.
-        """
-        with _EVIDENCE_MAP_LOCK:  # intra-process (threads)
-            try:
-                _EVIDENCE_MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-                # Acquire cross-process exclusive lock via lockfile
-                lock_fd = open(_EVIDENCE_MAP_LOCK_PATH, "w")
-                fcntl.flock(lock_fd, fcntl.LOCK_EX)
-                try:
-                    # Read current mapping (inside the lock)
-                    mapping: dict[str, str] = {}
-                    if _EVIDENCE_MAP_PATH.exists():
-                        try:
-                            mapping = json.loads(_EVIDENCE_MAP_PATH.read_text())
-                        except (json.JSONDecodeError, OSError):
-                            pass
-
-                    # Strip 0x prefix for consistency with registry_reader lookup
-                    key = data_hash_hex.removeprefix("0x")
-                    mapping[key] = evidence_cid
-
-                    # Atomic write: temp file -> fsync -> rename (same fs)
-                    tmp_fd = tempfile.NamedTemporaryFile(
-                        mode="w",
-                        dir=str(_EVIDENCE_MAP_PATH.parent),
-                        prefix=".evidence_map_",
-                        suffix=".tmp",
-                        delete=False,
-                    )
-                    try:
-                        tmp_fd.write(json.dumps(mapping, indent=2))
-                        tmp_fd.flush()
-                        os.fsync(tmp_fd.fileno())
-                        tmp_fd.close()
-                        os.rename(tmp_fd.name, str(_EVIDENCE_MAP_PATH))
-                    except BaseException:
-                        tmp_fd.close()
-                        try:
-                            os.unlink(tmp_fd.name)
-                        except OSError:
-                            pass
-                        raise
-
-                    logger.info(
-                        "sdk_client.evidence_mapping_written",
-                        data_hash=key,
-                        evidence_cid=evidence_cid,
-                        path=str(_EVIDENCE_MAP_PATH),
-                    )
-                finally:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                    lock_fd.close()
-            except OSError:
-                logger.exception(
-                    "sdk_client.evidence_mapping_write_failed",
-                    data_hash=data_hash_hex.removeprefix("0x"),
-                )
-
-    # ------------------------------------------------------------------
-    # Agent ID cache helpers
-    # ------------------------------------------------------------------
-
-    def _load_cached_agent_id(self) -> int | None:
-        """Return the cached agent ID for this wallet, or ``None``."""
-        if not _AGENT_ID_CACHE_PATH.exists():
-            return None
-        try:
-            data: dict[str, int] = json.loads(_AGENT_ID_CACHE_PATH.read_text())
-            return data.get(self.wallet_address)
-        except (json.JSONDecodeError, OSError):
-            return None
-
-    def _save_cached_agent_id(self, agent_id: int) -> None:
-        """Persist ``agent_id`` keyed by wallet address."""
-        data: dict[str, int] = {}
-        if _AGENT_ID_CACHE_PATH.exists():
-            try:
-                data = json.loads(_AGENT_ID_CACHE_PATH.read_text())
-            except (json.JSONDecodeError, OSError):
-                pass
-        data[self.wallet_address] = agent_id
-        _AGENT_ID_CACHE_PATH.write_text(json.dumps(data, indent=2))
-        logger.debug("sdk_client.agent_id_cached", path=str(_AGENT_ID_CACHE_PATH))
 
 
 # ---------------------------------------------------------------------------
