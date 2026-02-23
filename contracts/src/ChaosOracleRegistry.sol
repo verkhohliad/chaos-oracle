@@ -152,6 +152,19 @@ contract ChaosOracleRegistry is IChaosOracleRegistry, Ownable {
         authorizedWorkflowId = _workflowId;
     }
 
+    /// @notice Emergency-settle a studio without going through CRE.
+    /// @dev Owner-only escape hatch for studios stuck with orphaned on-chain data
+    ///      (e.g. unscored work hashes that prevent closeEpoch). Marks the studio
+    ///      as settled and calls the market callback with the given outcome.
+    function emergencySettle(address studio, uint8 outcome, bytes32 proofHash) external onlyOwner {
+        ActiveStudio storage as_ = activeStudios[studio];
+        if (as_.studio != studio) revert NotActiveStudio();
+        if (as_.settled) revert StudioAlreadySettled();
+        as_.settled = true;
+        IChaosOracleSettleable(as_.market).onSettlement(as_.marketId, outcome, proofHash);
+        emit StudioSettled(studio, as_.key, outcome, proofHash);
+    }
+
     // ============ Market Registration ============
 
     /// @inheritdoc IChaosOracleRegistry

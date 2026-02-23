@@ -193,6 +193,29 @@
   },
   {
     "type": "function",
+    "name": "emergencySettle",
+    "inputs": [
+      {
+        "name": "studio",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "outcome",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "proofHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "getActiveStudioCount",
     "inputs": [],
     "outputs": [

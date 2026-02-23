@@ -6,9 +6,9 @@ Foundry project containing the core settlement framework contracts and an exampl
 
 | Contract                    | Sepolia                                                       |
 |-----------------------------|---------------------------------------------------------------|
-| `ChaosOracleRegistry`       | `0x6f1911A35fac05c0443c2a8E2d83d5d3A055764E`  |
-| `PredictionSettlementLogic` | `0xc0c861dc81067738e03Ebe7a4d55781345aB5fae`      |
-| `ExamplePredictionMarket`   | `0xedE31BaF7E3fe79f8AbA25022494fBd92E01cC87` |
+| `ChaosOracleRegistry`       | `0x4D067737D50bFeC0da87Cc782eA144Aeb24c05d5`  |
+| `PredictionSettlementLogic` | `0x689FD6DF59eeC5aB4729015cB238330a33a346c5`      |
+| `ExamplePredictionMarket`   | `0x64A52A8ce57291cA701F18376f26E224F7E2AEcb` |
 
 ## Architecture
 
