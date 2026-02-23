@@ -1,0 +1,13 @@
+FROM ghcr.io/foundry-rs/foundry:stable
+
+# Install jq + docker CLI for docker exec into cre-runner
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    jq coreutils curl python3 docker.io \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy orchestration script
+COPY demo/run/orchestrate-sepolia.sh orchestrate-sepolia.sh
+RUN chmod +x orchestrate-sepolia.sh

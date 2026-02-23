@@ -1,0 +1,229 @@
+# ============================================================================
+# ChaosOracle Sepolia Demo — Docker Compose
+# ============================================================================
+# Runs gateway, xmtp-bridge, workers, and verifiers against Sepolia testnet.
+# Contracts must be deployed first (demo/deploy/deploy-all.sh).
+#
+# Usage:
+#   cd demo/run
+#   cp .env.example .env  # fill in your values
+#   docker compose -f docker-compose.sepolia.yml up --build
+
+services:
+  # ── PostgreSQL (Gateway persistence) ──
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: gateway
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: gateway
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── ChaosChain Gateway ──
+  gateway:
+    build:
+      context: ../../
+      dockerfile: sandbox/Dockerfile.gateway
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      HOST: "0.0.0.0"
+      LOG_LEVEL: info
+      DATABASE_URL: postgresql://postgres:gateway@postgres:5432/gateway
+      RPC_URL: ${SEPOLIA_RPC}
+      CHAIN_ID: "11155111"
+      CONFIRMATION_BLOCKS: "2"
+      CHAOS_CORE_ADDRESS: ${CHAOS_CORE_ADDRESS}
+      REWARDS_DISTRIBUTOR_ADDRESS: ${REWARDS_DISTRIBUTOR_ADDRESS}
+      TURBO_GATEWAY_URL: ${TURBO_GATEWAY_URL:-https://turbo.ardrive.io}
+      # Default signer = deployer (owner of RewardsDistributor)
+      SIGNER_PRIVATE_KEY: ${DEPLOYER_PRIVATE_KEY}
+      # Agent signers (used for StudioProxy calls on behalf of agents)
+      SIGNER_PRIVATE_KEY_2: ${WORKER_1_PRIVATE_KEY}
+      SIGNER_PRIVATE_KEY_3: ${WORKER_2_PRIVATE_KEY}
+      SIGNER_PRIVATE_KEY_4: ${VERIFIER_1_PRIVATE_KEY}
+      SIGNER_PRIVATE_KEY_5: ${VERIFIER_2_PRIVATE_KEY}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+
+  # ── XMTP Bridge (agent messaging) — DISABLED ──
+  # @xmtp/agent-sdk ^0.2.0 no longer exists (now 1.x). Agents don't use XMTP yet.
+  # Uncomment and fix the dependency when XMTP messaging is needed.
+  # xmtp-bridge:
+  #   build:
+  #     context: ../../
+  #     dockerfile: demo/run/gateway/Dockerfile.xmtp-bridge
+  #   ports:
+  #     - "3001:3001"
+  #   environment:
+  #     PORT: "3001"
+  #     XMTP_ENV: dev
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "wget -q -O - http://localhost:3001/health || exit 1"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 10
+
+  # ── Worker 1 ──
+  worker-1:
+    build:
+      context: ../../
+      dockerfile: sandbox/Dockerfile.agents
+    command: ["python", "-m", "worker.main"]
+    depends_on:
+      gateway:
+        condition: service_healthy
+    volumes:
+      - worker1-cache:/app/cache
+    environment:
+      WORKER_PRIVATE_KEY: ${WORKER_1_PRIVATE_KEY}
+      CHAOSCHAIN_GATEWAY_URL: http://gateway:3000
+      SEPOLIA_RPC_URL: ${SEPOLIA_RPC}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: gpt-4.1-2025-04-14
+      CHAOS_ORACLE_REGISTRY_ADDRESS: ${CHAOSORACLE_REGISTRY_ADDRESS}
+      REWARDS_DISTRIBUTOR_ADDRESS: ${REWARDS_DISTRIBUTOR_ADDRESS}
+
+      POLL_INTERVAL_SECONDS: "60"
+      WORKER_STAKE: "1000000000000000"
+      PYTHONUNBUFFERED: "1"
+    restart: unless-stopped
+
+  # ── Worker 2 ──
+  worker-2:
+    build:
+      context: ../../
+      dockerfile: sandbox/Dockerfile.agents
+    command: ["python", "-m", "worker.main"]
+    depends_on:
+      gateway:
+        condition: service_healthy
+    volumes:
+      - worker2-cache:/app/cache
+    environment:
+      WORKER_PRIVATE_KEY: ${WORKER_2_PRIVATE_KEY}
+      CHAOSCHAIN_GATEWAY_URL: http://gateway:3000
+      SEPOLIA_RPC_URL: ${SEPOLIA_RPC}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: gpt-4.1-2025-04-14
+      CHAOS_ORACLE_REGISTRY_ADDRESS: ${CHAOSORACLE_REGISTRY_ADDRESS}
+      REWARDS_DISTRIBUTOR_ADDRESS: ${REWARDS_DISTRIBUTOR_ADDRESS}
+
+      POLL_INTERVAL_SECONDS: "60"
+      WORKER_STAKE: "1000000000000000"
+      PYTHONUNBUFFERED: "1"
+    restart: unless-stopped
+
+  # ── Verifier 1 ──
+  verifier-1:
+    build:
+      context: ../../
+      dockerfile: sandbox/Dockerfile.agents
+    command: ["python", "-m", "verifier.main"]
+    depends_on:
+      gateway:
+        condition: service_healthy
+    volumes:
+      - verifier1-cache:/app/cache
+    environment:
+      VERIFIER_PRIVATE_KEY: ${VERIFIER_1_PRIVATE_KEY}
+      CHAOSCHAIN_GATEWAY_URL: http://gateway:3000
+      SEPOLIA_RPC_URL: ${SEPOLIA_RPC}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: o4-mini
+      CHAOS_ORACLE_REGISTRY_ADDRESS: ${CHAOSORACLE_REGISTRY_ADDRESS}
+      REWARDS_DISTRIBUTOR_ADDRESS: ${REWARDS_DISTRIBUTOR_ADDRESS}
+
+      POLL_INTERVAL_SECONDS: "60"
+      VERIFIER_STAKE: "1000000000000000"
+      PYTHONUNBUFFERED: "1"
+    restart: unless-stopped
+
+  # ── Verifier 2 ──
+  verifier-2:
+    build:
+      context: ../../
+      dockerfile: sandbox/Dockerfile.agents
+    command: ["python", "-m", "verifier.main"]
+    depends_on:
+      gateway:
+        condition: service_healthy
+    volumes:
+      - verifier2-cache:/app/cache
+    environment:
+      VERIFIER_PRIVATE_KEY: ${VERIFIER_2_PRIVATE_KEY}
+      CHAOSCHAIN_GATEWAY_URL: http://gateway:3000
+      SEPOLIA_RPC_URL: ${SEPOLIA_RPC}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: o4-mini
+      CHAOS_ORACLE_REGISTRY_ADDRESS: ${CHAOSORACLE_REGISTRY_ADDRESS}
+      REWARDS_DISTRIBUTOR_ADDRESS: ${REWARDS_DISTRIBUTOR_ADDRESS}
+
+      POLL_INTERVAL_SECONDS: "60"
+      VERIFIER_STAKE: "1000000000000000"
+      PYTHONUNBUFFERED: "1"
+    restart: unless-stopped
+
+  # ── CRE Runner: Chainlink CRE CLI + Bun for workflow simulation ──
+  cre-runner:
+    container_name: sepolia-cre-runner
+    build:
+      context: ../../cre-workflow
+      dockerfile: ../sandbox/Dockerfile.cre-runner
+    environment:
+      - CRE_ETH_PRIVATE_KEY=${DEPLOYER_PRIVATE_KEY}
+      - CRE_TARGET=sepolia-settings
+    volumes:
+      - shared:/shared
+      - ${HOME}/.cre:/root/.cre
+
+  # ── Orchestrator: Drives the full lifecycle ──
+  orchestrator:
+    build:
+      context: ../../
+      dockerfile: demo/run/Dockerfile.orchestrator
+    entrypoint: ["bash"]
+    command: ["/app/orchestrate-sepolia.sh"]
+    environment:
+      - RPC_URL=${SEPOLIA_RPC}
+      - DEPLOYER_PRIVATE_KEY=${DEPLOYER_PRIVATE_KEY}
+      - WORKER_1_PRIVATE_KEY=${WORKER_1_PRIVATE_KEY}
+      - WORKER_2_PRIVATE_KEY=${WORKER_2_PRIVATE_KEY}
+      - VERIFIER_1_PRIVATE_KEY=${VERIFIER_1_PRIVATE_KEY}
+      - VERIFIER_2_PRIVATE_KEY=${VERIFIER_2_PRIVATE_KEY}
+      - CHAOSORACLE_REGISTRY_ADDRESS=${CHAOSORACLE_REGISTRY_ADDRESS}
+      - EXAMPLE_MARKET_ADDRESS=${EXAMPLE_MARKET_ADDRESS}
+      - REWARDS_DISTRIBUTOR_ADDRESS=${REWARDS_DISTRIBUTOR_ADDRESS}
+      - CRE_RUNNER_CONTAINER=sepolia-cre-runner
+    depends_on:
+      gateway:
+        condition: service_healthy
+      cre-runner:
+        condition: service_started
+    volumes:
+      - shared:/shared
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  pgdata:
+  shared:
+  worker1-cache:
+  worker2-cache:
+  verifier1-cache:
+  verifier2-cache:

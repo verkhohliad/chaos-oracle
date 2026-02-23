@@ -74,11 +74,14 @@ ChaosOracle is a **plug-and-play settlement layer** for prediction markets. Inst
 |                        CRE WORKFLOW                                   |
 |                   (settlement-workflow/main.ts)                       |
 |                                                                       |
-|   TRIGGER 1: Cron (every 5 min)                                      |
+|   TRIGGER 0: Cron (every 5 min)                                      |
 |     -> Check deadlines -> Create studios for ready markets            |
 |                                                                       |
-|   TRIGGER 2: LogTrigger on EpochClosed (RewardsDistributor)          |
+|   TRIGGER 1: LogTrigger on EpochClosed (RewardsDistributor)          |
 |     -> Read finalized scores -> Fetch evidence -> settleWithOutcome()|
+|                                                                       |
+|   TRIGGER 2: Cron (every 3 min)                                      |
+|     -> Check studio readiness -> closeEpoch() via Gateway             |
 |                                                                       |
 +----------------------------------+------------------------------------+
                                    | creates & manages
@@ -181,11 +184,11 @@ Worker agents discover the studio, call `registerAsWorker{value: stake}()`, then
 
 Verifier agents discover worker submissions, call `registerAsVerifier{value: stake}()`, fetch evidence from IPFS/Arweave, audit it (LLM or heuristic), and submit score vectors (9 dimensions: 5 universal PoA + 4 prediction-specific). Each verifier scores **all** workers (e.g. 3 verifiers x 3 workers = 9 score submissions).
 
-### Phase 5: Close Epoch (Gateway/Admin)
+### Phase 5: Close Epoch (CRE Trigger 2 — Every 3 min Cron)
 
-The ChaosChain Gateway (or admin) calls `RewardsDistributor.closeEpoch(studio, epoch)`. This finalizes per-worker quality scores on-chain, distributes rewards, slashes wrong workers, and emits `EpochClosed(studio, epoch, totalWorkerRewards, totalValidatorRewards)`.
+CRE's `onReadyToClose` handler checks if active studios have sufficient worker submissions and verifier scores (two-layer readiness check: validators on RewardsDistributor + actual score vectors on StudioProxy). When ready, it calls the ChaosChain Gateway's `/workflows/close-epoch` endpoint, which calls `RewardsDistributor.closeEpoch(studio, epoch)`. This finalizes per-worker quality scores on-chain, distributes rewards, slashes wrong workers, and emits `EpochClosed(studio, epoch, totalWorkerRewards, totalValidatorRewards)`.
 
-### Phase 6: Settlement (CRE Trigger 2 — On EpochClosed)
+### Phase 6: Settlement (CRE Trigger 1 — On EpochClosed)
 
 CRE detects the `EpochClosed` event on RewardsDistributor. The `onEpochClosed` handler reads finalized quality scores via `getConsensusResult()`, fetches evidence from IPFS (sandbox) or Arweave (production) to extract each worker's predicted outcome, computes score-weighted consensus (outcome weighted by average quality score), and calls `settleWithOutcome(studio, outcome, proofHash, creReport)` via the Registry. The Registry calls `predictionMarket.onSettlement(marketId, outcome, proofHash)`.
 
@@ -261,8 +264,9 @@ interface IChaosOracleSettleable {
 
 | # | Trigger Type | Schedule/Event | Action |
 |---|--------------|----------------|--------|
-| 1 | Cron | Every 5 min | Check deadlines -> Create studios |
-| 2 | LogTrigger | `EpochClosed` on RewardsDistributor | Read finalized scores -> settleWithOutcome() |
+| 0 | Cron | Every 5 min | Check deadlines -> Create studios |
+| 1 | LogTrigger | `EpochClosed` on RewardsDistributor | Read finalized scores -> settleWithOutcome() |
+| 2 | Cron | Every 3 min | Check studio readiness -> closeEpoch() via Gateway |
 
 ### Workflow Code Structure
 
@@ -274,15 +278,20 @@ const initWorkflow = (config: Config) => {
     const evmClient = new EVMClient(network.chainSelector.selector);
 
     return [
-        // TRIGGER 1: Create studios for markets past deadline
+        // TRIGGER 0: Create studios for markets past deadline
         handler(
             cronCapability.trigger({ schedule: "*/5 * * * *" }),
             onCheckDeadlines
         ),
-        // TRIGGER 2: Settle on EpochClosed (LogTrigger on RewardsDistributor)
+        // TRIGGER 1: Settle on EpochClosed (LogTrigger on RewardsDistributor)
         handler(
             evmClient.logTrigger({ addresses: [config.rewardsDistributorAddress] }),
             onEpochClosed
+        ),
+        // TRIGGER 2: Check studio readiness, close epoch via Gateway
+        handler(
+            cronCapability.trigger({ schedule: "*/3 * * * *" }),
+            onReadyToClose
         ),
     ]
 }
@@ -528,10 +537,11 @@ def run_verifier(studio_address: str, data_hash, worker_address: str):
 | 20 | `cd sandbox && docker compose up --build` — runs full local sandbox |
 | 21 | `./place_bet.sh` — place bets on both sides |
 | 22 | Wait for market deadline to pass |
-| 23 | CRE Trigger 1 fires -> creates ChaosChain Studio automatically |
+| 23 | CRE Trigger 0 fires -> creates ChaosChain Studio automatically |
 | 24 | Worker agents discover studio -> research -> submit evidence |
 | 25 | Verifier agents audit evidence -> submit scores |
-| 26 | CRE Trigger 2 fires (EpochClosed) -> reads finalized scores -> `settleWithOutcome()` |
+| 26 | CRE Trigger 2 fires -> checks readiness -> closes epoch via Gateway |
+| 27 | CRE Trigger 1 fires (EpochClosed) -> reads finalized scores -> `settleWithOutcome()` |
 | 27 | `./check_settlement.sh` — verify outcome |
 
 ### Evidence Storage

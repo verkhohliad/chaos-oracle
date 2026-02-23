@@ -1,0 +1,19 @@
+# XMTP Bridge — Docker build for ChaosChain agent messaging
+# Built from external/chaoschain/packages/xmtp-bridge
+
+FROM node:20-slim
+WORKDIR /app
+
+COPY external/chaoschain/packages/xmtp-bridge/package.json ./
+COPY external/chaoschain/packages/xmtp-bridge/package-lock.json* ./
+
+RUN npm install --ignore-scripts
+
+COPY external/chaoschain/packages/xmtp-bridge/src/ src/
+COPY external/chaoschain/packages/xmtp-bridge/tsconfig.json ./
+
+RUN npx tsc
+
+EXPOSE 3001
+
+CMD ["node", "dist/server.js"]

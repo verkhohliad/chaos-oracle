@@ -2,14 +2,16 @@
 # Built from the git submodule at external/chaoschain/packages/gateway
 
 # ── Stage 1: Build ──
-FROM node:20-slim AS builder
+# Use node:20 (full) — native deps (keccak, secp256k1 via @ardrive/turbo-sdk)
+# need python3, make, g++ which are pre-installed in the full image.
+FROM node:20 AS builder
 WORKDIR /app
 
 # Copy package files first for layer caching
 COPY external/chaoschain/packages/gateway/package.json ./
 COPY external/chaoschain/packages/gateway/package-lock.json* ./
 
-RUN npm ci --ignore-scripts
+RUN npm install
 
 # Copy source and compile TypeScript
 COPY external/chaoschain/packages/gateway/src/ src/
@@ -19,7 +21,9 @@ RUN sed -i '/^  parseUnits,$/d' src/services/credit/circle-gateway-client.ts \
     && npx tsc
 
 # ── Stage 2: Runtime ──
-FROM node:20-slim
+# Use node:20 (full) — native addon .node files (keccak, secp256k1) need
+# libstdc++6 and other shared libs that may be absent in node:20-slim.
+FROM node:20
 WORKDIR /app
 
 # Install PostgreSQL client for running migrations
@@ -36,5 +40,6 @@ COPY external/chaoschain/packages/gateway/src/persistence/postgres/migrations/ .
 
 EXPOSE 3000
 
-# Run migrations then start the gateway
-CMD ["sh", "-c", "psql \"$DATABASE_URL\" -f /app/migrations/001_initial.sql && node dist/app.js"]
+# Run migrations, clear stale workflows from previous runs, then start the gateway.
+# TRUNCATE prevents reconcileAllActive() from blocking startup on stuck workflows.
+CMD ["sh", "-c", "psql \"$DATABASE_URL\" -f /app/migrations/001_initial.sql || true; psql \"$DATABASE_URL\" -c 'TRUNCATE workflows CASCADE' || true; node dist/app.js"]

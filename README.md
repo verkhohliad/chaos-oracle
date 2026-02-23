@@ -49,6 +49,28 @@ See [sandbox/README.md](./sandbox/README.md) for full instructions, expected out
 
 ---
 
+## Sepolia Demo
+
+Run the full settlement lifecycle on Ethereum Sepolia with real CRE triggers, Arweave evidence storage, and on-chain consensus:
+
+```bash
+cd demo/run
+cp .env.example .env
+# Edit .env — set SEPOLIA_RPC, DEPLOYER_PRIVATE_KEY, agent keys, OPENAI_API_KEY
+
+# Start services (Gateway + 2 workers + 2 verifiers)
+docker compose up --build
+
+# In another terminal — run the orchestrated demo
+./orchestrate-sepolia.sh
+```
+
+The orchestrator creates a market, waits for CRE to create a studio, monitors worker research and verifier scoring, triggers epoch close, and settles the market — all on Sepolia.
+
+See [demo/README.md](./demo/README.md) for prerequisites, contract deployment, CRE workflow setup, and troubleshooting.
+
+---
+
 ## Project Structure
 
 ```
@@ -56,6 +78,7 @@ contracts/       Solidity contracts (Registry, SettlementLogic, ExampleMarket)
 agents/          Python worker & verifier agents
 cre-workflow/    Chainlink CRE settlement workflow (TypeScript)
 sandbox/         Full local sandbox (14 Docker services)
+demo/            Sepolia demo (Docker services + orchestration script)
 abis/            Contract ABIs (generated from forge build)
 scripts/         Helper scripts (ABI export, etc.)
 ```
@@ -67,6 +90,7 @@ scripts/         Helper scripts (ABI export, etc.)
 | I want to... | Start here |
 |--------------|------------|
 | **Run the sandbox** | [sandbox/README.md](./sandbox/README.md) |
+| **Run the Sepolia demo** | [demo/README.md](./demo/README.md) |
 | **Integrate my prediction market** | [docs.md — For Prediction Market Developers](./docs.md#for-prediction-market-developers) |
 | **Build an AI agent** | [docs.md — For AI Agent Developers](./docs.md#for-ai-agent-developers) |
 | **Understand the architecture** | [docs.md — Architecture](./docs.md#architecture) |
@@ -79,9 +103,9 @@ scripts/         Helper scripts (ABI export, etc.)
 
 | Contract | Address |
 |----------|---------|
-| ChaosOracleRegistry | `0x6f1911A35fac05c0443c2a8E2d83d5d3A055764E` |
-| PredictionSettlementLogic | `0xc0c861dc81067738e03Ebe7a4d55781345aB5fae` |
-| ExamplePredictionMarket | `0xedE31BaF7E3fe79f8AbA25022494fBd92E01cC87` |
+| ChaosOracleRegistry | `0x4D067737D50bFeC0da87Cc782eA144Aeb24c05d5` |
+| PredictionSettlementLogic | `0x689FD6DF59eeC5aB4729015cB238330a33a346c5` |
+| ExamplePredictionMarket | `0x64A52A8ce57291cA701F18376f26E224F7E2AEcb` |
 | CRE Workflow ID | _TBD after DON deployment_ |
 
 ## Frontend

@@ -17,5 +17,9 @@ COPY abis/ abis/
 # Copy the real agent code from agents/
 COPY agents/ .
 
+# Create cache directory for ERC-8004 agent ID persistence.
+# Docker volumes mount here to survive container rebuilds.
+RUN mkdir -p /app/cache
+
 # Entry point is set by docker-compose (worker.main or verifier.main)
 CMD ["python", "-m", "worker.main"]
