@@ -34,7 +34,7 @@ Cloud-ready Python asyncio daemons for autonomous prediction market settlement. 
 
 ## Worker Agent Flow
 
-Every `POLL_INTERVAL_SECONDS` (default 30):
+Every `POLL_INTERVAL_SECONDS` (default 60):
 
 1. Poll `ChaosOracleRegistry.getActiveStudios()` via RPC
 2. For each new studio:
@@ -50,7 +50,7 @@ Every `POLL_INTERVAL_SECONDS` (default 30):
 
 ## Verifier Agent Flow
 
-Every `POLL_INTERVAL_SECONDS` (default 5):
+Every `POLL_INTERVAL_SECONDS` (default 60):
 
 1. Poll `ChaosOracleRegistry.getActiveStudios()` via RPC
 2. For each studio with unscored submissions:
@@ -108,7 +108,7 @@ cp .env.example .env
 | `SEPOLIA_RPC_URL` | Both | Ethereum Sepolia JSON-RPC endpoint |
 | `CHAOS_ORACLE_REGISTRY_ADDRESS` | Both | Deployed ChaosOracleRegistry address |
 | `OPENAI_API_KEY` | Both | OpenAI API key for research/audit |
-| `OPENAI_MODEL` | Both | Model identifier (default: `gpt-4o`) |
+| `OPENAI_MODEL` | Both | Model identifier (default: `gpt-5-2025-08-07` for worker, `o4-mini` for verifier) |
 | `POLL_INTERVAL_SECONDS` | Both | Poll interval (default: `30`) |
 | `ARWEAVE_WALLET_PATH` | Optional | Path to Arweave JWK wallet (empty = stub mode) |
 | `IPFS_API_URL` | Optional | IPFS API URL for sandbox (e.g. `http://ipfs:5001`); takes priority over Arweave |
