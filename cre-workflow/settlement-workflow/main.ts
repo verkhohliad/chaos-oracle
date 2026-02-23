@@ -1,9 +1,10 @@
 /**
  * ChaosOracle Settlement Workflow -- CRE entry point.
  *
- * Orchestrates prediction market settlement via two triggers:
+ * Orchestrates prediction market settlement via three triggers:
  *   1. Cron (every 5 min): Check for markets past deadline → create studios
  *   2. LogTrigger (EpochClosed on RewardsDistributor): Read finalized scores → settleWithOutcome
+ *   3. Cron (every 3 min): Check if studios are ready for epoch closing → call Gateway close-epoch
  *
  * Business logic is extracted into core.ts (pure functions, no CRE SDK dep).
  * This file contains thin CRE handler wrappers that route I/O through the SDK
@@ -41,13 +42,19 @@ import {
   decodeMarketsReady,
   decodeWorkParticipants,
   decodeWorkSubmitter,
+  decodeWorkValidators,
+  decodeScoreVectorsForWorker,
   encodeCreateStudioForMarket,
+  encodeGetActiveStudios,
+  decodeActiveStudios,
   encodeGetConsensusResult,
   encodeGetEpochWork,
   encodeGetEvidenceCID,
   encodeGetMarketsReady,
+  encodeGetScoreVectorsForWorker,
   encodeGetWorkParticipants,
   encodeGetWorkSubmitter,
+  encodeGetWorkValidators,
   encodeSettleWithOutcome,
   resolveOutcomeFromEvidence,
 } from "./core";
@@ -61,13 +68,16 @@ const configSchema = z.object({
   rewardsDistributorAddress: z.string(),
   chainSelectorName: z.string(),
   gasLimit: z.string(),
-  minWorkers: z.string().default("3"),
+  minWorkers: z.string().default("2"),
   minValidators: z.string().default("2"),
   minScoresPerWorker: z.string().default("2"),
   rpcUrl: z.string().default(""),
   arweaveGatewayUrl: z.string().default("https://arweave.net"),
   ipfsGatewayUrl: z.string().default("https://ipfs.io"),
   fromBlock: z.string().default("0x0"),
+  // Trigger 3: Epoch closing via Gateway
+  gatewayUrl: z.string().default(""),
+  defaultSignerAddress: z.string().default(""),
 });
 
 type Config = z.infer<typeof configSchema>;
@@ -359,11 +369,162 @@ const onEpochClosed = (runtime: Runtime<Config>, event: EVMLog): string => {
 };
 
 // ---------------------------------------------------------------------------
+// Handler 3: Check Readiness to Close Epoch (Cron → Gateway)
+// ---------------------------------------------------------------------------
+// Checks active studios for sufficient work+score submissions. When thresholds
+// are met, calls the Gateway's close-epoch workflow which invokes
+// RewardsDistributor.closeEpoch() using the deployer signer.
+// ---------------------------------------------------------------------------
+
+const onReadyToClose = (runtime: Runtime<Config>, _payload: CronPayload): string => {
+  const registryAddress = runtime.config.registryAddress as Address;
+  const evmConfig = runtime.config;
+  const evm = createEvmClient(evmConfig.chainSelectorName);
+  const http = new HTTPClient();
+
+  const gatewayUrl = evmConfig.gatewayUrl;
+  const defaultSignerAddress = evmConfig.defaultSignerAddress;
+
+  if (!gatewayUrl || !defaultSignerAddress) {
+    runtime.log("[onReadyToClose] gatewayUrl or defaultSignerAddress not configured. Skipping.");
+    return "not configured";
+  }
+
+  runtime.log("[onReadyToClose] Checking active studios for epoch readiness...");
+
+  // 1. Read active studios from registry
+  const studiosData = evmRead(evm, runtime, registryAddress, encodeGetActiveStudios());
+  const studios = decodeActiveStudios(studiosData);
+
+  if (studios.length === 0) {
+    runtime.log("[onReadyToClose] No active studios.");
+    return "no active studios";
+  }
+
+  runtime.log(`[onReadyToClose] Found ${studios.length} active studio(s).`);
+
+  const minWorkers = parseInt(evmConfig.minWorkers || "2");
+  const minScoresPerWorker = parseInt(evmConfig.minScoresPerWorker || "2");
+  let closedCount = 0;
+
+  for (const studioAddress of studios) {
+    try {
+      // 2. Get work hashes for epoch 1
+      const rewardsDistributorAddress = evmConfig.rewardsDistributorAddress as Address;
+      const epochWorkData = evmRead(
+        evm, runtime, rewardsDistributorAddress,
+        encodeGetEpochWork(studioAddress as Address, 1n),
+      );
+      const workHashes = decodeEpochWork(epochWorkData);
+
+      if (workHashes.length < minWorkers) {
+        runtime.log(`[onReadyToClose] Studio ${studioAddress}: ${workHashes.length}/${minWorkers} workers. Not ready.`);
+        continue;
+      }
+
+      // 3. Check score submissions — two-layer validation:
+      //    Layer 1: getWorkValidators(dataHash) on RewardsDistributor — verifies
+      //             registerValidator() was called (pre-closeEpoch).
+      //    Layer 2: getScoreVectorsForWorker(dataHash, worker) on StudioProxy —
+      //             verifies actual score vectors exist for every participant.
+      //    closeEpoch() checks BOTH: "No validators" (layer 1) and
+      //    "No scores for worker" (layer 2). We must verify both.
+      let totalScoreCount = 0;
+      let allWorkHashesReady = true;
+      for (const dataHash of workHashes) {
+        try {
+          // Layer 1: Check validators registered on RewardsDistributor
+          const validatorsData = evmRead(
+            evm, runtime, rewardsDistributorAddress,
+            encodeGetWorkValidators(dataHash),
+          );
+          const validators = decodeWorkValidators(validatorsData);
+          if (validators.length === 0) {
+            allWorkHashesReady = false;
+            runtime.log(`[onReadyToClose] Studio ${studioAddress}: dataHash ${dataHash} has 0 validators. Not ready.`);
+            break;
+          }
+
+          // Layer 2: Check actual score vectors on StudioProxy for each participant
+          const participantsData = evmRead(
+            evm, runtime, studioAddress as Address,
+            encodeGetWorkParticipants(dataHash),
+          );
+          const participants = decodeWorkParticipants(participantsData);
+
+          let allParticipantsScored = true;
+          for (const worker of participants) {
+            if (worker === zeroAddress) continue;
+            try {
+              const scoresData = evmRead(
+                evm, runtime, studioAddress as Address,
+                encodeGetScoreVectorsForWorker(dataHash, worker),
+              );
+              const { validators: scoreValidators } = decodeScoreVectorsForWorker(scoresData);
+              if (scoreValidators.length === 0) {
+                allParticipantsScored = false;
+                runtime.log(`[onReadyToClose] Studio ${studioAddress}: dataHash ${dataHash} worker ${worker} has 0 score vectors. Not ready.`);
+                break;
+              }
+            } catch {
+              allParticipantsScored = false;
+              runtime.log(`[onReadyToClose] Studio ${studioAddress}: failed to read scores for worker ${worker} on dataHash ${dataHash}.`);
+              break;
+            }
+          }
+
+          if (!allParticipantsScored) {
+            allWorkHashesReady = false;
+            break;
+          }
+
+          totalScoreCount += validators.length;
+        } catch {
+          allWorkHashesReady = false;
+          break;
+        }
+      }
+
+      if (!allWorkHashesReady) {
+        continue;
+      }
+
+      const requiredScores = minWorkers * minScoresPerWorker; // e.g. 2 * 2 = 4
+      if (totalScoreCount < requiredScores) {
+        runtime.log(`[onReadyToClose] Studio ${studioAddress}: ${totalScoreCount}/${requiredScores} score submissions. Not ready.`);
+        continue;
+      }
+
+      // 4. Studio is ready — call Gateway close-epoch
+      runtime.log(`[onReadyToClose] Studio ${studioAddress}: READY for epoch close. Calling Gateway...`);
+      const closeEpochBody = JSON.stringify({
+        studio_address: studioAddress,
+        epoch: 1,
+        signer_address: defaultSignerAddress,
+      });
+
+      try {
+        httpFetchJson(http, runtime, "POST", `${gatewayUrl}/workflows/close-epoch`, closeEpochBody);
+        closedCount++;
+        runtime.log(`[onReadyToClose] Studio ${studioAddress}: close-epoch workflow submitted to Gateway.`);
+      } catch (err) {
+        runtime.log(`[onReadyToClose] Studio ${studioAddress}: Gateway call failed: ${String(err)}`);
+      }
+    } catch (err) {
+      runtime.log(`[onReadyToClose] Studio ${studioAddress}: error checking readiness: ${String(err)}`);
+    }
+  }
+
+  return `checked ${studios.length} studio(s), closed ${closedCount}`;
+};
+
+// ---------------------------------------------------------------------------
 // Workflow initialization & entry point
 // ---------------------------------------------------------------------------
 // Trigger index mapping (as shown by `cre workflow simulate`):
 //   1. cron-trigger@1.0.0 Trigger        → onCheckDeadlines
 //   2. evm:ChainSelector:... LogTrigger   → onEpochClosed
+//   3. cron-trigger@1.0.0 Trigger        → onReadyToClose
 // ---------------------------------------------------------------------------
 
 const initWorkflow = (config: Config) => {
@@ -394,6 +555,12 @@ const initWorkflow = (config: Config) => {
         addresses: [config.rewardsDistributorAddress],
       }),
       onEpochClosed,
+    ),
+
+    // Trigger 3: Check epoch readiness every 3 minutes, close via Gateway
+    handler(
+      cronCapability.trigger({ schedule: "*/3 * * * *" }),
+      onReadyToClose,
     ),
   ];
 };

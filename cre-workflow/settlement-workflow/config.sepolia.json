@@ -1,0 +1,14 @@
+{
+  "registryAddress": "0x4D067737D50bFeC0da87Cc782eA144Aeb24c05d5",
+  "rewardsDistributorAddress": "0x11aF07D8933a25B7fa32D06408d77a3ffaDcEAD1",
+  "chainSelectorName": "ethereum-testnet-sepolia",
+  "gasLimit": "6000000",
+  "minWorkers": "2",
+  "minValidators": "2",
+  "minScoresPerWorker": "2",
+  "arweaveGatewayUrl": "https://arweave.net",
+  "ipfsGatewayUrl": "https://ipfs.io",
+  "fromBlock": "10321603",
+  "gatewayUrl": "http://192.168.97.4:3000",
+  "defaultSignerAddress": "0x34E057b970D7c230a5e46c7A78C63A370d76c284"
+}

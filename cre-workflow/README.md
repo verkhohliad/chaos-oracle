@@ -1,28 +1,31 @@
 # ChaosOracle CRE Workflow
 
-Chainlink CRE (Chainlink Runtime Environment) workflow that orchestrates prediction market settlement. Two triggers handle the full lifecycle: creating studios for markets past their deadline, and settling outcomes once verifier scores are finalized on-chain.
+Chainlink CRE (Chainlink Runtime Environment) workflow that orchestrates prediction market settlement. Three triggers handle the full lifecycle: creating studios for markets past their deadline, closing epochs when scores are ready, and settling outcomes once verifier scores are finalized on-chain.
 
 ## Architecture
 
 ```
 CRE DON (Decentralized Oracle Network)
   |
-  |-- Trigger 1: Cron (every 5 min)
+  |-- Trigger 0: Cron (every 5 min)
   |   +-- onCheckDeadlines --> createStudioForMarket()
   |
-  +-- Trigger 2: LogTrigger (EpochClosed on RewardsDistributor)
-      +-- onEpochClosed --> reads finalized scores --> settleWithOutcome()
+  |-- Trigger 1: LogTrigger (EpochClosed on RewardsDistributor)
+  |   +-- onEpochClosed --> reads finalized scores --> settleWithOutcome()
+  |
+  +-- Trigger 2: Cron (every 3 min)
+      +-- onReadyToClose --> checks studio readiness --> Gateway /close-epoch
 ```
 
 All writes go through the **CRE Forwarder** contract. The Registry validates `msg.sender == creForwarder` and verifies the `workflowId` from the CRE report.
 
 ## Handlers
 
-### `onCheckDeadlines` (Cron -- every 5 min)
+### `onCheckDeadlines` (Trigger 0 -- Cron every 5 min)
 
 Reads `getMarketsReadyForSettlement()` from the Registry. For each market past its deadline without a studio, calls `createStudioForMarket(key, creReport)` via CRE report signing.
 
-### `onEpochClosed` (LogTrigger -- EpochClosed on RewardsDistributor)
+### `onEpochClosed` (Trigger 1 -- LogTrigger on RewardsDistributor)
 
 Fires when `EpochClosed(address indexed studio, uint64 indexed epoch, uint256 workCount, uint256 validatorCount)` is emitted by the RewardsDistributor after `closeEpoch()` finalizes per-worker quality scores on-chain.
 
@@ -34,6 +37,15 @@ Settlement steps:
 5. Fetch evidence from IPFS (sandbox) or Arweave (production) to extract each worker's predicted outcome
 6. Compute score-weighted consensus: each worker's outcome is weighted by the mean of their finalized quality scores (9 dimensions)
 7. Call `settleWithOutcome(studio, outcome, proofHash, creReport)` where `proofHash = keccak256(sorted evidence CIDs joined by comma)`
+
+### `onReadyToClose` (Trigger 2 -- Cron every 3 min)
+
+Checks if active studios have sufficient worker submissions and verifier scores to close the epoch. Performs a two-layer readiness check:
+
+1. Read all work hashes for the studio's epoch via `getEpochWork(studio, epoch)` on RewardsDistributor
+2. **Layer 1**: For each work hash, check validators registered on RewardsDistributor via `getWorkValidators(dataHash)`
+3. **Layer 2**: For each work hash and participant, verify actual score vectors exist on StudioProxy via `getScoreVectorsForWorker(dataHash, worker)`
+4. If all checks pass (min workers, min validators, min scores per worker), calls the ChaosChain Gateway's `/workflows/close-epoch` endpoint to trigger `closeEpoch()` on RewardsDistributor
 
 ## EVM Interaction Pattern
 
@@ -92,6 +104,34 @@ cre workflow simulate ./settlement-workflow
 
 # Deploy to DON
 cre workflow deploy ./settlement-workflow --target staging-settings
+
+# Trigger 0 — onCheckDeadlines (creates studios for markets past deadline)
+cd cre-workflow
+cre workflow simulate ./settlement-workflow \
+  --target sepolia-settings \
+  --broadcast \
+  --non-interactive \
+  --trigger-index 0 \
+  --engine-logs
+
+# Trigger 2 — onReadyToClose (checks studio readiness, closes epoch via Gateway)
+cre workflow simulate ./settlement-workflow \
+  --target sepolia-settings \
+  --broadcast \
+  --non-interactive \
+  --trigger-index 2 \
+  --engine-logs
+
+# Trigger 1 — onEpochClosed (reads scores, settles market — needs tx hash)
+cre workflow simulate ./settlement-workflow \
+  --target sepolia-settings \
+  --broadcast \
+  --non-interactive \
+  --trigger-index 1 \
+  --evm-tx-hash 0x<EPOCH_CLOSED_TX_HASH> \
+  --evm-event-index 0 \
+  --engine-logs
+
 
 # Note the WORKFLOW_ID from the deploy output
 # Then authorize it on-chain:
@@ -160,6 +200,6 @@ cre-workflow/
 
 **IPFS is sandbox-only, Arweave is production**: Evidence CIDs starting with `Qm` or `bafy` are routed to the IPFS gateway (only available in the Docker sandbox via the `ipfs` service). All other CIDs are assumed to be Arweave transaction IDs and routed to the Arweave gateway. SHA-256 stub CIDs (64 hex characters) have no real evidence and are skipped.
 
-**CRE triggers cannot be named**: The CRE SDK does not support naming triggers. When running `cre workflow simulate`, triggers are presented by index: trigger 1 = `onCheckDeadlines` (cron), trigger 2 = `onEpochClosed` (log). Select the trigger number via stdin (e.g., `echo '1' | cre workflow simulate .`).
+**CRE triggers cannot be named**: The CRE SDK does not support naming triggers. When running `cre workflow simulate`, triggers are presented by index: trigger 0 = `onCheckDeadlines` (cron), trigger 1 = `onEpochClosed` (log), trigger 2 = `onReadyToClose` (cron). Use `--trigger-index N` or select the trigger number via stdin.
 
 **Score truncation**: The ChaosChain gateway encoder truncates 9 scoring dimensions to 5 for on-chain `uint8[]` storage. The `onEpochClosed` handler reads whatever dimensions are stored and averages them for the consensus weight.

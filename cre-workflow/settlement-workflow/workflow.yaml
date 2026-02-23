@@ -14,6 +14,14 @@ production-settings:
     config-path: "./config.production.json"
     secrets-path: ""
 
+sepolia-settings:
+  user-workflow:
+    workflow-name: "chaosoracle-settlement-sepolia"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.sepolia.json"
+    secrets-path: ""
+
 sandbox-settings:
   user-workflow:
     workflow-name: "chaosoracle-settlement-sandbox"

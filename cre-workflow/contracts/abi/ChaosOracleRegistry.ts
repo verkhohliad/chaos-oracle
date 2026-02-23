@@ -171,6 +171,19 @@ export const STUDIO_PROXY_VIEWS = [
     outputs: [{ name: "", type: "uint256", internalType: "uint256" }],
     stateMutability: "view",
   },
+  {
+    type: "function",
+    name: "getScoreVectorsForWorker",
+    inputs: [
+      { name: "dataHash", type: "bytes32", internalType: "bytes32" },
+      { name: "worker", type: "address", internalType: "address" },
+    ],
+    outputs: [
+      { name: "validators", type: "address[]", internalType: "address[]" },
+      { name: "scoreVectors", type: "bytes[]", internalType: "bytes[]" },
+    ],
+    stateMutability: "view",
+  },
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -200,6 +213,13 @@ export const REWARDS_DISTRIBUTOR_ABI = [
       { name: "timestamp", type: "uint256", internalType: "uint256" },
       { name: "finalized", type: "bool", internalType: "bool" },
     ],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "getWorkValidators",
+    inputs: [{ name: "dataHash", type: "bytes32", internalType: "bytes32" }],
+    outputs: [{ name: "validators", type: "address[]", internalType: "address[]" }],
     stateMutability: "view",
   },
 ] as const;

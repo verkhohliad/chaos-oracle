@@ -192,6 +192,14 @@ export function encodeGetConsensusResult(dataHash: `0x${string}`): `0x${string}`
   });
 }
 
+export function encodeGetWorkValidators(dataHash: `0x${string}`): `0x${string}` {
+  return encodeFunctionData({
+    abi: REWARDS_DISTRIBUTOR_ABI,
+    functionName: "getWorkValidators",
+    args: [dataHash],
+  });
+}
+
 export function encodeGetWorkParticipants(dataHash: `0x${string}`): `0x${string}` {
   return encodeFunctionData({
     abi: STUDIO_PROXY_VIEWS,
@@ -241,12 +249,44 @@ export function decodeConsensusResultData(data: `0x${string}`): FinalizedConsens
   };
 }
 
+export function decodeWorkValidators(data: `0x${string}`): readonly Address[] {
+  return decodeFunctionResult({
+    abi: REWARDS_DISTRIBUTOR_ABI,
+    functionName: "getWorkValidators",
+    data,
+  }) as readonly Address[];
+}
+
 export function decodeWorkParticipants(data: `0x${string}`): readonly Address[] {
   return decodeFunctionResult({
     abi: STUDIO_PROXY_VIEWS,
     functionName: "getWorkParticipants",
     data,
   }) as readonly Address[];
+}
+
+/** Encode getScoreVectorsForWorker(dataHash, worker) call on StudioProxy */
+export function encodeGetScoreVectorsForWorker(
+  dataHash: `0x${string}`,
+  worker: Address,
+): `0x${string}` {
+  return encodeFunctionData({
+    abi: STUDIO_PROXY_VIEWS,
+    functionName: "getScoreVectorsForWorker",
+    args: [dataHash, worker],
+  });
+}
+
+/** Decode getScoreVectorsForWorker result — returns [validators[], scoreVectors[]] */
+export function decodeScoreVectorsForWorker(
+  data: `0x${string}`,
+): { validators: readonly Address[]; scoreVectors: readonly `0x${string}`[] } {
+  const decoded = decodeFunctionResult({
+    abi: STUDIO_PROXY_VIEWS,
+    functionName: "getScoreVectorsForWorker",
+    data,
+  }) as readonly [readonly Address[], readonly `0x${string}`[]];
+  return { validators: decoded[0], scoreVectors: decoded[1] };
 }
 
 /**
