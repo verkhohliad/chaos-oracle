@@ -51,21 +51,30 @@ See [sandbox/README.md](./sandbox/README.md) for full instructions, expected out
 
 ## Sepolia Demo
 
-Run the full settlement lifecycle on Ethereum Sepolia with real CRE triggers, Arweave evidence storage, and on-chain consensus:
+Run the full settlement lifecycle on Ethereum Sepolia with real CRE triggers, Arweave evidence storage, and on-chain consensus. Two ways to experience it:
 
+**Option A — CLI Orchestrator** (automated end-to-end):
 ```bash
 cd demo/run
-cp .env.example .env
-# Edit .env — set SEPOLIA_RPC, DEPLOYER_PRIVATE_KEY, agent keys, OPENAI_API_KEY
-
-# Start services (Gateway + 2 workers + 2 verifiers)
+cp .env.example .env   # set SEPOLIA_RPC, keys, OPENAI_API_KEY, contract addresses
 docker compose up --build
-
-# In another terminal — run the orchestrated demo
 ./orchestrate-sepolia.sh
 ```
 
-The orchestrator creates a market, waits for CRE to create a studio, monitors worker research and verifier scoring, triggers epoch close, and settles the market — all on Sepolia.
+**Option B — Frontend Explorer** (interactive UI):
+```bash
+# 1. Start backend services
+cd demo/run && docker compose up --build
+
+# 2. Start indexer (in another terminal)
+cd demo/indexer && pnpm install && pnpm codegen && pnpm dev
+
+# 3. Start frontend (in another terminal)
+cd demo/frontend && npm install && npm run dev
+# Open http://localhost:3000
+```
+
+Browse markets, connect your wallet, place bets, watch live DKG settlement (worker submissions, verifier score matrix, consensus), inspect AI evidence from Arweave, and claim winnings — all in a Uniswap-style dark UI.
 
 See [demo/README.md](./demo/README.md) for prerequisites, contract deployment, CRE workflow setup, and troubleshooting.
 
@@ -74,13 +83,16 @@ See [demo/README.md](./demo/README.md) for prerequisites, contract deployment, C
 ## Project Structure
 
 ```
-contracts/       Solidity contracts (Registry, SettlementLogic, ExampleMarket)
-agents/          Python worker & verifier agents
-cre-workflow/    Chainlink CRE settlement workflow (TypeScript)
-sandbox/         Full local sandbox (14 Docker services)
-demo/            Sepolia demo (Docker services + orchestration script)
-abis/            Contract ABIs (generated from forge build)
-scripts/         Helper scripts (ABI export, etc.)
+contracts/        Solidity contracts (Registry, SettlementLogic, ExampleMarket)
+agents/           Python worker & verifier agents
+cre-workflow/     Chainlink CRE settlement workflow (TypeScript)
+sandbox/          Full local sandbox (14 Docker services)
+demo/run/         Sepolia demo — Docker Compose + orchestrator
+demo/indexer/     Envio HyperIndex — GraphQL indexer for on-chain events
+demo/frontend/    Next.js 15 explorer — market UI, betting, DKG visualization
+demo/deploy/      Foundry deployment scripts
+abis/             Contract ABIs (generated from forge build)
+scripts/          Helper scripts (ABI export, etc.)
 ```
 
 ---
@@ -91,6 +103,8 @@ scripts/         Helper scripts (ABI export, etc.)
 |--------------|------------|
 | **Run the sandbox** | [sandbox/README.md](./sandbox/README.md) |
 | **Run the Sepolia demo** | [demo/README.md](./demo/README.md) |
+| **Explore the frontend** | [demo/frontend/README.md](./demo/frontend/README.md) |
+| **Set up the indexer** | [demo/indexer/README.md](./demo/indexer/README.md) |
 | **Integrate my prediction market** | [docs.md — For Prediction Market Developers](./docs.md#for-prediction-market-developers) |
 | **Build an AI agent** | [docs.md — For AI Agent Developers](./docs.md#for-ai-agent-developers) |
 | **Understand the architecture** | [docs.md — Architecture](./docs.md#architecture) |
@@ -110,7 +124,16 @@ scripts/         Helper scripts (ABI export, etc.)
 
 ## Frontend
 
-_Coming soon_
+Next.js 15 prediction market explorer.
+
+- **Browse markets** — pool bars, status badges, countdowns
+- **Connect wallet** — RainbowKit + wagmi v2 on Sepolia
+- **Place bets** — Yes/No binary markets with ETH
+- **Watch DKG settlement** — live worker submissions, verifier score matrix, consensus result
+- **Inspect AI evidence** — Arweave-stored research with sources, confidence scores, reasoning
+- **Claim winnings** — pro-rata payout after settlement
+
+See [demo/frontend/README.md](./demo/frontend/README.md) for setup.
 
 ---
 
@@ -129,6 +152,8 @@ Full technical documentation — architecture diagrams, security model, complete
 | Smart Contracts | Solidity 0.8.24, Foundry |
 | AI Agents | Python 3.12, web3.py, aiohttp, structlog |
 | CRE Workflow | TypeScript, Chainlink CRE SDK |
+| Frontend | Next.js 15, React 19, Tailwind CSS v4, wagmi v2, RainbowKit |
+| Indexer | Envio HyperIndex v2, GraphQL |
 | Evidence Storage | IPFS (sandbox) / Arweave (production) |
 | Agent Identity | ERC-8004 |
 | Agent Payments | x402 |

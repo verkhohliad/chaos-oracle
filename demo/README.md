@@ -31,15 +31,20 @@ Production-ready demo of the ChaosOracle prediction market settlement system on 
                                         ERC-8004 Reputation
 ```
 
-**Services** (8 Docker containers):
+**Backend services** (8 Docker containers):
 - `postgres` — Gateway persistence
 - `gateway` — ChaosChain Gateway (dual-signer routing)
-- `xmtp-bridge` — XMTP messaging bridge for Python agents
-- `worker-1`, `worker-2` — AI worker agents
-- `verifier-1`, `verifier-2` — AI verifier agents
+- `worker-1`, `worker-2` — AI worker agents (gpt-4.1 + web_search)
+- `verifier-1`, `verifier-2` — AI verifier agents (o4-mini)
+- `cre-runner` — Chainlink CRE CLI + Bun runtime
+- `orchestrator` — Drives the settlement lifecycle
+
+**Companion tools** (run on host):
+- [**Envio Indexer**](./indexer/README.md) — indexes on-chain events into GraphQL
+- [**Next.js Frontend**](./frontend/README.md) — market explorer with DKG visualization
 
 **Contracts** (deployed on Sepolia):
-- ChaosChainRegistry, ChaosCore, RewardsDistributor (deployed by us)
+- ChaosChainRegistry, ChaosCore, RewardsDistributor
 - ChaosOracleRegistry, PredictionSettlementLogic, ExamplePredictionMarket
 - StudioProxyFactory, ERC-8004 registries (reused from ChaosChain team)
 
@@ -49,8 +54,9 @@ Production-ready demo of the ChaosOracle prediction market settlement system on 
 - **API Keys**: OpenAI (`sk-...`), Alchemy/Infura Sepolia RPC
 - **Tools**: `foundry` (forge, cast), `docker`, `docker compose`, CRE CLI
 - **CRE CLI**: `cre workflow deploy` requires Chainlink CRE access
+- **Node.js 22+** and **pnpm** (for indexer local dev)
 
-## Quick Start
+## Setup
 
 ### 1. Deploy Contracts
 
@@ -89,29 +95,75 @@ cp .env.example .env
 # Fill in: contract addresses from addresses.sepolia.json
 ```
 
-### 4. Start Services
+### 4. Start Backend Services
 
 ```bash
 cd demo/run
-docker compose -f docker-compose.sepolia.yml up --build
+docker compose up --build
 ```
 
-### 5. Run Demo
+This starts all 8 containers: postgres, gateway, 2 workers, 2 verifiers, cre-runner, orchestrator.
+
+## Running the Demo
+
+### Option A: CLI Orchestrator (automated)
+
+Run the full settlement lifecycle end-to-end from the command line:
 
 ```bash
 cd demo/run
 ./orchestrate-sepolia.sh
 ```
 
-The orchestrator:
+The orchestrator automatically:
 1. Creates a prediction market with a 3-minute deadline
-2. Places test bets
-3. Monitors CRE trigger 1 creating a studio
-4. Monitors workers researching and submitting evidence
+2. Places test bets (Yes + No)
+3. Waits for deadline, then triggers CRE to create a studio
+4. Monitors workers researching and submitting evidence to Arweave
 5. Monitors verifiers auditing and scoring
-6. Monitors CRE trigger 3 closing the epoch via Gateway
-7. Monitors CRE trigger 2 settling the market
-8. Displays results
+6. Triggers epoch close via CRE + Gateway
+7. Triggers settlement via CRE (score-weighted consensus)
+8. Displays final results
+
+Best for: quick verification, CI, headless runs.
+
+### Option B: Frontend Explorer (interactive)
+
+Experience the full settlement UX through a Uniswap-style web interface.
+
+**1. Start the indexer** (indexes on-chain events into GraphQL):
+
+```bash
+cd demo/indexer
+pnpm install
+pnpm codegen
+pnpm dev          # Starts indexer + local PostgreSQL on port 8080
+```
+
+Or use [Envio hosted service](https://docs.envio.dev/docs/HyperIndex/hosted-service) — see [indexer/README.md](./indexer/README.md).
+
+**2. Start the frontend**:
+
+```bash
+cd demo/frontend
+cp .env.local.example .env.local
+# Set INDEXER_GRAPHQL_URL=http://localhost:8080/v1/graphql (or Envio hosted URL)
+# Set NEXT_PUBLIC_MARKET_ADDRESS=<from addresses.sepolia.json>
+
+npm install
+npm run dev       # http://localhost:3000
+```
+
+**3. Explore**:
+
+- **Browse markets** — pool bars showing Yes/No distribution, status badges, countdowns
+- **Connect wallet** — RainbowKit modal, Sepolia network
+- **Place bets** — select Yes or No, enter ETH amount, submit transaction
+- **Watch live DKG settlement** — worker submissions appear in real-time, verifier score matrix fills in, consensus builds
+- **Inspect AI evidence** — click through to Arweave-stored research: sources, confidence scores, reasoning chains, web search queries
+- **Claim winnings** — after settlement, claim pro-rata share of the winning pool
+
+Best for: demos, presentations, exploring the full settlement UX.
 
 ## Settlement Flow
 
@@ -123,33 +175,27 @@ The orchestrator:
 6. **Settlement**: CRE log trigger detects `EpochClosed`, reads finalized scores, computes consensus, calls `settleWithOutcome()`
 7. **Withdrawals**: Agents call `withdraw()` on StudioProxy to claim stakes + rewards
 
-## Gateway Dual-Signer Routing
+## Project Structure
 
-The Gateway uses two types of signers:
-- **Agent signer** (per-agent private key): Used for `StudioProxy.submitWork()` and `submitScoreVectorForWorker()`
-- **Default signer** (deployer key): Used for `RewardsDistributor.registerWork()`, `registerValidator()`, `closeEpoch()`
-
-This is required because RewardsDistributor operations require owner authority.
-
-## ERC-8004 Verification
-
-After epoch close, query agent reputation:
-
-```bash
-cast call --rpc-url $SEPOLIA_RPC \
-    0x8004B8FD1A363aa02fDC07635C0c5F94f6Af5B7E \
-    "getReputation(address,string)(int128,uint8)" \
-    <AGENT_ADDRESS> "prediction-settlement"
-```
+| Directory | Purpose |
+|-----------|---------|
+| `demo/deploy/` | Foundry two-phase deployment scripts (`addresses.sepolia.json`) |
+| `demo/run/` | Docker Compose (8 services) + `orchestrate-sepolia.sh` |
+| `demo/indexer/` | Envio HyperIndex — 4 contracts, 11 events, 8 GraphQL entities ([README](./indexer/README.md)) |
+| `demo/frontend/` | Next.js 15 explorer — Uniswap dark theme, wagmi, DKG panel ([README](./frontend/README.md)) |
 
 ## Troubleshooting
 
 **CRE trigger not firing**: Check workflow is deployed and authorized (`setAuthorizedWorkflowId`). Verify the CRE Forwarder address matches.
 
-**Gateway signer error**: Ensure all agent private keys are in `.env` as `SIGNER_PRIVATE_KEY_2` through `SIGNER_PRIVATE_KEY_5`.
+**Gateway signer error**: Ensure all agent private keys are in `.env` as `SIGNER_PRIVATE_KEY_2` through `SIGNER_PRIVATE_KEY_5`. The Gateway uses dual-signer routing: agent keys for StudioProxy calls, deployer key for RewardsDistributor.
 
-**Worker/verifier stuck**: Check OpenAI API key is valid. Check RPC URL connectivity. Review container logs: `docker compose -f docker-compose.sepolia.yml logs worker-1`.
+**Worker/verifier stuck**: Check OpenAI API key is valid. Check RPC URL connectivity. Review container logs: `docker compose logs worker-1`.
 
 **Insufficient gas**: CRE `gasLimit` must be 6M+ for `deployStudioProxy()`. Check `config.sepolia.json`.
 
 **Evidence fetch fails**: Arweave uploads may take 5-10 seconds to propagate. Verifiers retry on next poll cycle.
+
+**Indexer won't start**: `envio start` / `pnpm dev` needs Docker Desktop running — it launches its own PostgreSQL + Hasura containers. Run `pnpm stop` first to clean up stale state.
+
+**Frontend shows no data**: Ensure `INDEXER_GRAPHQL_URL` in `.env.local` points to a running indexer (local `http://localhost:8080/v1/graphql` or Envio hosted URL). The frontend proxies GraphQL requests through `/api/graphql`.
