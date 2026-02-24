@@ -1,0 +1,50 @@
+name: chaosoracle-indexer
+
+contracts:
+  - name: ExamplePredictionMarket
+    abi_file_path: abis/ExamplePredictionMarket.json
+    handler: src/EventHandlers.ts
+    events:
+      - event: "MarketCreated(uint256 indexed marketId, address indexed creator, string question, uint256 deadline, uint256 settlementReward)"
+      - event: "BetPlaced(uint256 indexed marketId, address indexed bettor, uint8 option, uint256 amount)"
+      - event: "MarketSettled(uint256 indexed marketId, uint8 outcome, bytes32 proofHash)"
+      - event: "WinningsClaimed(uint256 indexed marketId, address indexed claimer, uint256 amount)"
+
+  - name: ChaosOracleRegistry
+    abi_file_path: abis/ChaosOracleRegistry.json
+    handler: src/EventHandlers.ts
+    events:
+      - event: "MarketRegistered(bytes32 indexed key, address indexed market, uint256 indexed marketId, string question, string[] options, uint256 deadline, uint256 reward)"
+      - event: "StudioCreated(bytes32 indexed key, address indexed studio, uint256 studioId, address indexed market, uint256 marketId)"
+      - event: "StudioSettled(address indexed studio, bytes32 indexed key, uint8 outcome, bytes32 proofHash)"
+
+  - name: RewardsDistributor
+    abi_file_path: abis/RewardsDistributor.json
+    handler: src/EventHandlers.ts
+    events:
+      - event: "EpochClosed(address indexed studio, uint64 indexed epoch, uint256 workCount, uint256 validatorCount)"
+
+  - name: StudioProxy
+    abi_file_path: abis/StudioProxy.json
+    handler: src/EventHandlers.ts
+    events:
+      - event: "AgentRegistered(uint256 indexed agentId, address indexed agentAddress, uint8 role, uint256 stake)"
+      - event: "WorkSubmitted(uint256 indexed agentId, bytes32 indexed dataHash, bytes32 threadRoot, bytes32 evidenceRoot, uint256 timestamp)"
+      - event: "ScoreVectorSubmittedForWorker(uint256 indexed validatorAgentId, bytes32 indexed dataHash, address indexed worker, bytes scoreVector, uint256 timestamp)"
+
+field_selection:
+  transaction_fields:
+    - "hash"
+
+networks:
+  - id: 11155111
+    start_block: 10321603
+    contracts:
+      - name: ExamplePredictionMarket
+        address: "0x64A52A8ce57291cA701F18376f26E224F7E2AEcb"
+      - name: ChaosOracleRegistry
+        address: "0x4D067737D50bFeC0da87Cc782eA144Aeb24c05d5"
+      - name: RewardsDistributor
+        address: "0x11aF07D8933a25B7fa32D06408d77a3ffaDcEAD1"
+      - name: StudioProxy
+        # No address — dynamically registered via StudioCreated contractRegister

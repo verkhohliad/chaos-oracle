@@ -1,0 +1,19 @@
+{
+  "name": "chaosoracle-indexer",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "envio start",
+    "codegen": "envio codegen",
+    "stop": "envio stop"
+  },
+  "dependencies": {
+    "envio": "^2.21.5"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

@@ -1,0 +1,97 @@
+type Market {
+  id: ID!
+  marketId: BigInt! @index
+  creator: String! @index
+  question: String!
+  options: [String!]!
+  deadline: BigInt!
+  yesPool: BigInt!
+  noPool: BigInt!
+  outcome: Int
+  proofHash: String
+  settled: Boolean!
+  settlementReward: BigInt!
+  registryKey: String! @index
+  studio: Studio
+  bets: [Bet!]! @derivedFrom(field: "market")
+  claims: [Claim!]! @derivedFrom(field: "market")
+  createdAtBlock: BigInt!
+  createdAtTimestamp: BigInt!
+}
+
+type Bet {
+  id: ID!
+  market: Market!
+  bettor: String! @index
+  option: Int!
+  amount: BigInt!
+  blockTimestamp: BigInt!
+}
+
+type Claim {
+  id: ID!
+  market: Market!
+  claimer: String! @index
+  amount: BigInt!
+  blockTimestamp: BigInt!
+}
+
+type Studio {
+  id: ID!
+  market: Market!
+  studioId: BigInt!
+  registryKey: String! @index
+  settled: Boolean!
+  outcome: Int
+  proofHash: String
+  agents: [StudioAgent!]! @derivedFrom(field: "studio")
+  workSubmissions: [WorkSubmission!]! @derivedFrom(field: "studio")
+  scoreVectors: [ScoreVector!]! @derivedFrom(field: "studio")
+  epochClose: EpochClose
+  createdAtBlock: BigInt!
+  createdAtTimestamp: BigInt!
+  settledAtTimestamp: BigInt
+}
+
+type StudioAgent {
+  id: ID!
+  studio: Studio!
+  agentId: BigInt!
+  agentAddress: String! @index
+  role: Int!
+  stake: BigInt!
+  blockTimestamp: BigInt!
+}
+
+type WorkSubmission {
+  id: ID!
+  studio: Studio!
+  agentId: BigInt!
+  agentAddress: String @index
+  dataHash: String! @index
+  threadRoot: String!
+  evidenceRoot: String!
+  timestamp: BigInt!
+  scoreVectors: [ScoreVector!]! @derivedFrom(field: "workSubmission")
+}
+
+type ScoreVector {
+  id: ID!
+  studio: Studio!
+  workSubmission: WorkSubmission!
+  validatorAgentId: BigInt!
+  validatorAddress: String @index
+  worker: String! @index
+  scoreVector: String!
+  timestamp: BigInt!
+}
+
+type EpochClose {
+  id: ID!
+  studio: Studio!
+  epoch: BigInt!
+  workCount: BigInt!
+  validatorCount: BigInt!
+  blockTimestamp: BigInt!
+  txHash: String!
+}
