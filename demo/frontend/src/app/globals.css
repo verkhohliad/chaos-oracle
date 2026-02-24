@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+@theme {
+  --color-surface-1: #131313;
+  --color-surface-1-hover: #1B1B1B;
+  --color-surface-2: #1F1F1F;
+  --color-surface-2-hover: #242424;
+  --color-surface-3: #393939;
+  --color-accent: #A855F7;
+  --color-accent-hover: #C084FC;
+  --color-success: #21C95E;
+  --color-warning: #FFBF17;
+  --color-critical: #FF593C;
+}
+
+:root {
+  --background: #000000;
+  --foreground: #ffffff;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+}
+
+/* Remove number input spinners */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
