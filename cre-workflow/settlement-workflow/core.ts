@@ -227,25 +227,26 @@ export interface FinalizedConsensusResult {
 }
 
 export function decodeConsensusResultData(data: `0x${string}`): FinalizedConsensusResult {
-  const decoded = decodeAbiParameters(
-    [
-      { name: "dataHash", type: "bytes32" },
-      { name: "consensusScores", type: "uint8[]" },
-      { name: "totalStake", type: "uint256" },
-      { name: "validatorCount", type: "uint256" },
-      { name: "timestamp", type: "uint256" },
-      { name: "finalized", type: "bool" },
-    ],
+  const result = decodeFunctionResult({
+    abi: REWARDS_DISTRIBUTOR_ABI,
+    functionName: "getConsensusResult",
     data,
-  );
+  }) as {
+    dataHash: `0x${string}`;
+    consensusScores: readonly number[];
+    totalStake: bigint;
+    validatorCount: bigint;
+    timestamp: bigint;
+    finalized: boolean;
+  };
 
   return {
-    dataHash: decoded[0] as `0x${string}`,
-    consensusScores: (decoded[1] as readonly number[]).map(Number),
-    totalStake: decoded[2] as bigint,
-    validatorCount: decoded[3] as bigint,
-    timestamp: decoded[4] as bigint,
-    finalized: decoded[5] as boolean,
+    dataHash: result.dataHash,
+    consensusScores: [...result.consensusScores].map(Number),
+    totalStake: result.totalStake,
+    validatorCount: result.validatorCount,
+    timestamp: result.timestamp,
+    finalized: result.finalized,
   };
 }
 
@@ -423,14 +424,17 @@ export function buildEvidenceUrl(
   ipfsGatewayUrl: string,
   arweaveGatewayUrl: string,
 ): string | null {
-  if (evidenceCID.startsWith("Qm") || evidenceCID.startsWith("bafy")) {
-    return `${ipfsGatewayUrl}/ipfs/${evidenceCID}`;
+  // Strip ar:// protocol prefix (Gateway stores CIDs as "ar://{txId}")
+  const cid = evidenceCID.startsWith("ar://") ? evidenceCID.slice(5) : evidenceCID;
+
+  if (cid.startsWith("Qm") || cid.startsWith("bafy")) {
+    return `${ipfsGatewayUrl}/ipfs/${cid}`;
   }
-  if (evidenceCID.length === 64) {
+  if (cid.length === 64) {
     // SHA-256 stub CID — no real evidence available
     return null;
   }
-  return `${arweaveGatewayUrl}/${evidenceCID}`;
+  return `${arweaveGatewayUrl}/${cid}`;
 }
 
 // ---------------------------------------------------------------------------

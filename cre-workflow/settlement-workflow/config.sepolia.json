@@ -9,6 +9,6 @@
   "arweaveGatewayUrl": "https://arweave.net",
   "ipfsGatewayUrl": "https://ipfs.io",
   "fromBlock": "10321603",
-  "gatewayUrl": "http://192.168.97.4:3000",
+  "gatewayUrl": "http://gateway.run.orb.local:3000",
   "defaultSignerAddress": "0x34E057b970D7c230a5e46c7A78C63A370d76c284"
 }
