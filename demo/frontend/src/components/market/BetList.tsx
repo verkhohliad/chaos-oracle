@@ -1,5 +1,6 @@
 import type { Bet } from "@/types";
-import { shortenAddress, formatEth } from "@/lib/utils";
+import { formatEth } from "@/lib/utils";
+import { ExplorerLink } from "@/components/ui/ExplorerLink";
 
 export function BetList({ bets }: { bets: Bet[] }) {
   if (!bets || bets.length === 0) {
@@ -27,8 +28,12 @@ export function BetList({ bets }: { bets: Bet[] }) {
           <tbody>
             {bets.map((bet) => (
               <tr key={bet.id} className="border-b border-white/[0.04]">
-                <td className="py-2.5 pr-4 font-mono text-white/65">
-                  {shortenAddress(bet.bettor)}
+                <td className="py-2.5 pr-4">
+                  <ExplorerLink
+                    type="address"
+                    hash={bet.bettor}
+                    className="font-mono text-xs"
+                  />
                 </td>
                 <td className="py-2.5 pr-4">
                   <span

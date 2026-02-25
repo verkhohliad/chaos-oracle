@@ -8,6 +8,7 @@ import { BetForm } from "@/components/market/BetForm";
 import { BetList } from "@/components/market/BetList";
 import { MarketTimeline } from "@/components/market/MarketTimeline";
 import { ClaimButton } from "@/components/market/ClaimButton";
+import { SettlementBreakdown } from "@/components/market/SettlementBreakdown";
 import { DkgPanel } from "@/components/dkg/DkgPanel";
 import { Skeleton } from "@/components/ui/Skeleton";
 
@@ -69,13 +70,22 @@ export default function MarketDetailPage({
           <BetList bets={market.bets ?? []} />
 
           {market.studio && <DkgPanel studio={market.studio} />}
+
+          {status === "settled" && <SettlementBreakdown market={market} />}
         </div>
 
         {/* Right column */}
         <div className="space-y-6">
           <BetForm marketId={market.id} status={status} />
 
-          {status === "settled" && <ClaimButton marketId={market.id} />}
+          {status === "settled" && (
+            <ClaimButton
+              marketId={market.id}
+              outcome={market.outcome}
+              yesPool={market.yesPool}
+              noPool={market.noPool}
+            />
+          )}
 
           <MarketTimeline market={market} status={status} />
         </div>

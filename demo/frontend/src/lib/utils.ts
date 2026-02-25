@@ -1,5 +1,5 @@
 import { formatEther } from "viem";
-import type { Market, MarketStatus } from "@/types";
+import type { Market, MarketStatus, ScoringDimension } from "@/types";
 
 export function shortenAddress(addr: string, chars = 4): string {
   return `${addr.slice(0, chars + 2)}...${addr.slice(-chars)}`;
@@ -20,9 +20,9 @@ export function getMarketStatus(market: Market): MarketStatus {
   return "active";
 }
 
-export function statusLabel(status: MarketStatus, outcome?: number | null, options?: string[]): string {
+export function statusLabel(status: MarketStatus, outcome: number | null = null, options: string[] = ['Yes', 'No']): string {
   if (status === "settled" && outcome != null && options) {
-    return `Settled: ${options[outcome] ?? `Option ${outcome}`}`;
+    return `${options[outcome] ?? `Option ${outcome}`}`;
   }
   if (status === "closed") return "Awaiting Settlement";
   return "Active";
@@ -53,6 +53,16 @@ export function timeUntil(timestamp: string | number): string {
 
 export function decodeScoreVector(hex: string): number[] {
   const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
+  // ABI-encoded: each uint8 sits in a 32-byte (64 hex char) slot, value in last byte
+  if (clean.length >= 64) {
+    const numSlots = Math.floor(clean.length / 64);
+    const scores: number[] = [];
+    for (let i = 0; i < numSlots; i++) {
+      scores.push(parseInt(clean.slice(i * 64 + 62, i * 64 + 64), 16));
+    }
+    return scores;
+  }
+  // Fallback: packed bytes (for any non-ABI data)
   const bytes: number[] = [];
   for (let i = 0; i < clean.length; i += 2) {
     bytes.push(parseInt(clean.slice(i, i + 2), 16));
@@ -60,25 +70,74 @@ export function decodeScoreVector(hex: string): number[] {
   return bytes;
 }
 
-export function evidenceUrl(evidenceRoot: string): string | null {
-  if (!evidenceRoot || evidenceRoot === "0x" + "0".repeat(64)) return null;
-  const clean = evidenceRoot.startsWith("0x") ? evidenceRoot.slice(2) : evidenceRoot;
-  // Arweave tx IDs are 43-char base64url; IPFS CIDs start with Qm or bafy
-  // On-chain we store bytes32, so we treat it as an Arweave tx ID hex
-  return `https://arweave.net/${clean}`;
+// ============ Explorer Links ============
+
+const EXPLORER_BASE = "https://sepolia.etherscan.io";
+
+export function explorerUrl(
+  type: "tx" | "address" | "block",
+  hash: string
+): string {
+  return `${EXPLORER_BASE}/${type}/${hash}`;
 }
 
-export const SCORE_DIMENSIONS = [
-  "Initiative",
-  "Collaboration",
-  "Reasoning Depth",
-  "Compliance",
-  "Efficiency",
+// ============ Outcome helpers ============
+// Contract: opts[0] = "Yes", opts[1] = "No". outcome 0 = Yes wins, 1 = No wins, 255 = unresolved.
+
+export function outcomeLabel(outcome: number, options?: string[]): string {
+  if (options && options[outcome]) return options[outcome];
+  if (outcome === 0) return "Yes";
+  if (outcome === 1) return "No";
+  return `Option ${outcome}`;
+}
+
+// ============ Score Dimensions ============
+// 9 dimensions from PredictionSettlementLogic.getScoringCriteria()
+// Gateway truncates to 5 for on-chain uint8[] storage.
+
+export const SCORE_DIMENSIONS: ScoringDimension[] = [
+  { name: "Initiative", weight: 100 },
+  { name: "Collaboration", weight: 100 },
+  { name: "Reasoning Depth", weight: 100 },
+  { name: "Compliance", weight: 100 },
+  { name: "Efficiency", weight: 100 },
+  // Prediction-specific (higher weights)
+  { name: "Accuracy", weight: 200 },
+  { name: "Evidence Quality", weight: 150 },
+  { name: "Source Diversity", weight: 120 },
+  { name: "Reasoning Depth", weight: 130 },
 ];
+
+export function getScoreDimension(index: number): ScoringDimension {
+  return SCORE_DIMENSIONS[index] ?? { name: `Dim ${index}`, weight: 100 };
+}
+
+export function computeWeightedAverage(
+  scores: number[],
+  dimensions?: ScoringDimension[]
+): number {
+  if (scores.length === 0) return 0;
+  const dims = dimensions ?? SCORE_DIMENSIONS;
+  let weightedSum = 0;
+  let totalWeight = 0;
+  for (let i = 0; i < scores.length; i++) {
+    const w = dims[i]?.weight ?? 100;
+    weightedSum += scores[i] * w;
+    totalWeight += w;
+  }
+  return totalWeight > 0 ? weightedSum / totalWeight : 0;
+}
 
 export function scoreColor(score: number): string {
   if (score >= 80) return "bg-[#21C95E]/15 text-[#21C95E]";
   if (score >= 60) return "bg-[#FFBF17]/15 text-[#FFBF17]";
   if (score >= 40) return "bg-[#FF593C]/15 text-[#FF593C]/80";
   return "bg-[#FF593C]/15 text-[#FF593C]";
+}
+
+export function roleLabel(role: number): string {
+  if (role === 1) return "Worker";
+  if (role === 2) return "Verifier";
+  if (role === 0) return "None";
+  return `Role ${role}`;
 }

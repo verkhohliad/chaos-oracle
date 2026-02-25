@@ -25,6 +25,7 @@ export interface Bet {
   option: number;
   amount: string;
   blockTimestamp: string;
+  txHash?: string;
 }
 
 export interface Claim {
@@ -32,6 +33,7 @@ export interface Claim {
   claimer: string;
   amount: string;
   blockTimestamp: string;
+  txHash?: string;
 }
 
 export interface Studio {
@@ -57,6 +59,7 @@ export interface StudioAgent {
   role: number;
   stake: string;
   blockTimestamp: string;
+  studio_id?: string;
 }
 
 export interface WorkSubmission {
@@ -100,3 +103,30 @@ export interface EvidencePayload {
 }
 
 export type MarketStatus = "active" | "closed" | "settled";
+
+// ============ Scoring ============
+
+export interface ScoringDimension {
+  name: string;
+  weight: number;
+}
+
+export interface ConsensusData {
+  dataHash: string;
+  consensusScores: number[];
+  totalStake: bigint;
+  validatorCount: bigint;
+  timestamp: bigint;
+  finalized: boolean;
+}
+
+// ============ Agent ============
+
+export interface AgentSummary {
+  agentAddress: string;
+  agentId: string;
+  role: number; // 1 = worker, 2 = verifier (StudioProxy AgentRole enum)
+  studioCount: number;
+  submissionCount: number;
+  scoreCount: number;
+}

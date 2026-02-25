@@ -11,7 +11,7 @@ export function BetForm({
   marketId: string;
   status: MarketStatus;
 }) {
-  const [option, setOption] = useState<0 | 1>(0);
+  const [option, setOption] = useState<0 | 1>(1);
   const [amount, setAmount] = useState("");
   const { placeBet, isPending } = usePlaceBet();
 
@@ -31,6 +31,7 @@ export function BetForm({
       <h2 className="mb-5 text-sm font-medium text-white/65">Place a bet</h2>
 
       <div className="mb-5 flex gap-3">
+        {/* option 0 = Yes */}
         <button
           type="button"
           onClick={() => setOption(0)}
@@ -42,6 +43,7 @@ export function BetForm({
         >
           Yes
         </button>
+        {/* option 1 = No */}
         <button
           type="button"
           onClick={() => setOption(1)}

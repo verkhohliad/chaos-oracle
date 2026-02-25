@@ -93,3 +93,70 @@ export const MARKET_DETAIL_QUERY = `
     }
   }
 `;
+
+// ============ Agent Queries ============
+
+export const AGENTS_QUERY = `
+  query Agents($limit: Int, $offset: Int) {
+    StudioAgent(
+      limit: $limit,
+      offset: $offset,
+      order_by: { blockTimestamp: desc }
+    ) {
+      id
+      agentId
+      agentAddress
+      role
+      stake
+      blockTimestamp
+      studio_id
+    }
+  }
+`;
+
+export const AGENT_DETAIL_QUERY = `
+  query AgentDetail($agentAddress: String!) {
+    StudioAgent(
+      where: { agentAddress: { _eq: $agentAddress } }
+      order_by: { blockTimestamp: desc }
+    ) {
+      id
+      agentId
+      agentAddress
+      role
+      stake
+      blockTimestamp
+      studio_id
+    }
+    WorkSubmission(
+      where: { agentAddress: { _eq: $agentAddress } }
+      order_by: { timestamp: desc }
+    ) {
+      id
+      agentId
+      agentAddress
+      dataHash
+      threadRoot
+      evidenceRoot
+      timestamp
+      scoreVectors {
+        id
+        validatorAgentId
+        validatorAddress
+        scoreVector
+        timestamp
+      }
+    }
+    ScoreVector(
+      where: { validatorAddress: { _eq: $agentAddress } }
+      order_by: { timestamp: desc }
+    ) {
+      id
+      validatorAgentId
+      validatorAddress
+      worker
+      scoreVector
+      timestamp
+    }
+  }
+`;

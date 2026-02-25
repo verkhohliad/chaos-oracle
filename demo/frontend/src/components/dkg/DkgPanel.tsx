@@ -49,12 +49,14 @@ export function DkgPanel({ studio }: { studio: Studio }) {
           <WorkerSubmissions
             submissions={studio.workSubmissions ?? []}
             agents={studio.agents ?? []}
+            studioAddress={studio.id}
           />
         )}
         {tab === "Scores" && (
           <VerifierScoreMatrix
             submissions={studio.workSubmissions ?? []}
             agents={studio.agents ?? []}
+            studioAddress={studio.id}
           />
         )}
         {tab === "Consensus" && (

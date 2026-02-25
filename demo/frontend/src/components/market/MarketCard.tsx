@@ -38,7 +38,9 @@ export function MarketCard({ market }: { market: Market }) {
             ETH volume
           </span>
           {market.studio && (
-            <span className="text-[#A855F7]">Studio active</span>
+            <span className={market.settled || market.studio.settled ? "text-[#A855F7]" : "text-[#FFBF17]"}>
+              {market.settled || market.studio.settled ? "Settled" : "Studio active"}
+            </span>
           )}
         </div>
       </div>

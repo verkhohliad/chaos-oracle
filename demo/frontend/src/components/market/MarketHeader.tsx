@@ -4,11 +4,11 @@ import type { Market } from "@/types";
 import {
   getMarketStatus,
   formatEth,
-  shortenAddress,
 } from "@/lib/utils";
 import { Badge } from "@/components/ui/Badge";
 import { PoolBar } from "@/components/ui/PoolBar";
 import { Countdown } from "@/components/ui/Countdown";
+import { ExplorerLink } from "@/components/ui/ExplorerLink";
 
 export function MarketHeader({ market }: { market: Market }) {
   const status = getMarketStatus(market);
@@ -28,12 +28,21 @@ export function MarketHeader({ market }: { market: Market }) {
       </div>
 
       <div className="mb-6 flex flex-wrap gap-5 text-xs text-white/[0.38]">
-        <span>Creator: {shortenAddress(market.creator)}</span>
+        <span className="flex items-center gap-1">
+          Creator:{" "}
+          <ExplorerLink type="address" hash={market.creator} className="text-xs" />
+        </span>
         <span>Volume: {formatEth(totalVolume.toString())} ETH</span>
         <span>
           Settlement reward: {formatEth(market.settlementReward)} ETH
         </span>
         <Countdown deadline={market.deadline} />
+        {market.studio && (
+          <span className="flex items-center gap-1">
+            Studio:{" "}
+            <ExplorerLink type="address" hash={market.studio.id} className="text-xs" />
+          </span>
+        )}
       </div>
 
       <PoolBar yesPool={market.yesPool} noPool={market.noPool} />
