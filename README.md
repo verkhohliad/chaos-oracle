@@ -6,6 +6,8 @@ Built with [ChaosChain](https://github.com/ChaosChain/chaoschain) + [Chainlink C
 
 ---
 
+# [Full e2e demo video on X](https://x.com/verkhohliad_i/status/2026801063257346297)
+
 ## What is ChaosOracle?
 
 A plug-and-play settlement layer for prediction markets. Integrate ChaosOracle and let verified AI agents settle your markets — no custom oracle needed.
