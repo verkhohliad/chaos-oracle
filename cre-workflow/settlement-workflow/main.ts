@@ -2,9 +2,9 @@
  * ChaosOracle Settlement Workflow -- CRE entry point.
  *
  * Orchestrates prediction market settlement via three triggers:
- *   1. Cron (every 5 min): Check for markets past deadline → create studios
+ *   1. Cron (every 10 min): Check for markets past deadline → create studios
  *   2. LogTrigger (EpochClosed on RewardsDistributor): Read finalized scores → settleWithOutcome
- *   3. Cron (every 3 min): Check if studios are ready for epoch closing → call Gateway close-epoch
+ *   3. Cron (every 10 min): Check if studios are ready for epoch closing → call Gateway close-epoch
  *
  * Business logic is extracted into core.ts (pure functions, no CRE SDK dep).
  * This file contains thin CRE handler wrappers that route I/O through the SDK
@@ -543,9 +543,9 @@ const initWorkflow = (config: Config) => {
   const evmClient = new EVMClient(network.chainSelector.selector);
 
   return [
-    // Trigger 1: Check deadlines every 5 minutes
+    // Trigger 1: Check deadlines every 10 minutes
     handler(
-      cronCapability.trigger({ schedule: "*/5 * * * *" }),
+      cronCapability.trigger({ schedule: "*/10 * * * *" }),
       onCheckDeadlines,
     ),
 
@@ -557,9 +557,9 @@ const initWorkflow = (config: Config) => {
       onEpochClosed,
     ),
 
-    // Trigger 3: Check epoch readiness every 3 minutes, close via Gateway
+    // Trigger 3: Check epoch readiness every 10 minutes, close via Gateway
     handler(
-      cronCapability.trigger({ schedule: "*/3 * * * *" }),
+      cronCapability.trigger({ schedule: "*/10 * * * *" }),
       onReadyToClose,
     ),
   ];
