@@ -28,6 +28,7 @@ npm run dev       # http://localhost:3000
 | `NEXT_PUBLIC_CHAIN_ID` | Public | Chain ID (default: 11155111 Sepolia) |
 | `NEXT_PUBLIC_MARKET_ADDRESS` | Public | ExamplePredictionMarket contract |
 | `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | Public | WalletConnect Cloud project ID |
+| `NEXT_PUBLIC_ENABLE_CREATE_MARKET` | Public | Show Create Market button (default: `true`, set `false` to hide) |
 | `INDEXER_GRAPHQL_URL` | Server | Envio GraphQL endpoint (proxied via `/api/graphql`) |
 
 ## Pages

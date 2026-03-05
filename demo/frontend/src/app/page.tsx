@@ -13,12 +13,14 @@ export default function ExplorePage() {
             AI-settled prediction markets powered by ChaosChain + Chainlink CRE
           </p>
         </div>
-        <Link
-          href="/create"
-          className="rounded-xl bg-[#A855F7] px-4 py-2.5 text-sm font-medium text-white transition-all duration-200 hover:bg-[#C084FC]"
-        >
-          + Create Market
-        </Link>
+        {process.env.NEXT_PUBLIC_ENABLE_CREATE_MARKET !== "false" && (
+          <Link
+            href="/create"
+            className="rounded-xl bg-[#A855F7] px-4 py-2.5 text-sm font-medium text-white transition-all duration-200 hover:bg-[#C084FC]"
+          >
+            + Create Market
+          </Link>
+        )}
       </div>
       <MarketGrid />
     </main>
