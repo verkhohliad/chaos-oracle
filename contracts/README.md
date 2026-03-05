@@ -4,11 +4,26 @@ Foundry project containing the core settlement framework contracts and an exampl
 
 ## Addresses
 
-| Contract                    | Sepolia                                                       |
-|-----------------------------|---------------------------------------------------------------|
-| `ChaosOracleRegistry`       | `0x4D067737D50bFeC0da87Cc782eA144Aeb24c05d5`  |
-| `PredictionSettlementLogic` | `0x689FD6DF59eeC5aB4729015cB238330a33a346c5`      |
+### Deployed Contracts (Sepolia)
+
+| Contract                    | Sepolia                                      |
+|-----------------------------|----------------------------------------------|
+| `ChaosCore`                 | `0xfBEE0CF0BB8bA4A6120B8b9aeB9BA0895EbaC877` |
+| `ChaosChainRegistry`        | `0x8C721d2A3d1FDe2B6F4234132214Ff9028E0312c` |
+| `RewardsDistributor`        | `0x11aF07D8933a25B7fa32D06408d77a3ffaDcEAD1` |
+| `ChaosOracleRegistry`       | `0x4D067737D50bFeC0da87Cc782eA144Aeb24c05d5` |
+| `PredictionSettlementLogic` | `0x689FD6DF59eeC5aB4729015cB238330a33a346c5` |
 | `ExamplePredictionMarket`   | `0x64A52A8ce57291cA701F18376f26E224F7E2AEcb` |
+
+### Reused Sepolia Contracts
+
+| Contract                    | Sepolia                                      |
+|-----------------------------|----------------------------------------------|
+| `StudioProxyFactory`        | `0x230e76a105A9737Ea801BB7d0624D495506EE257` |
+| `IdentityRegistry`          | `0x8004A818BFB912233c491871b3d84c89A494BD9e` |
+| `ReputationRegistry`        | `0x8004B663056A597Dffe9eCcC1965A193B7388713` |
+| `ValidationRegistry`        | `0x8004CB39f29c09145F24Ad9dDe2A108C1A2cdfC5` |
+| `CRE Forwarder`             | `0x15fc6ae953e024d975e77382eeec56a9101f9f88` |
 
 ## Architecture
 

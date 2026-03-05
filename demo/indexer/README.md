@@ -6,9 +6,9 @@ Envio-powered indexer for ChaosOracle prediction market events on Sepolia.
 
 | Contract | Address | Events |
 |----------|---------|--------|
-| ExamplePredictionMarket | `0x64A5...AEcb` | MarketCreated, BetPlaced, MarketSettled, WinningsClaimed |
-| ChaosOracleRegistry | `0x4D06...d5` | MarketRegistered, StudioCreated, StudioSettled |
-| RewardsDistributor | `0x11aF...AD1` | EpochClosed |
+| ExamplePredictionMarket | `0x64A52A8ce57291cA701F18376f26E224F7E2AEcb` | MarketCreated, BetPlaced, MarketSettled, WinningsClaimed |
+| ChaosOracleRegistry | `0x4D067737D50bFeC0da87Cc782eA144Aeb24c05d5` | MarketRegistered, StudioCreated, StudioSettled |
+| RewardsDistributor | `0x11aF07D8933a25B7fa32D06408d77a3ffaDcEAD1` | EpochClosed |
 | StudioProxy | Dynamic | AgentRegistered, WorkSubmitted, ScoreVectorSubmittedForWorker |
 
 StudioProxy addresses are registered dynamically when `StudioCreated` fires.

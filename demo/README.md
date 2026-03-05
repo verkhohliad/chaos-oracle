@@ -7,9 +7,9 @@ Production-ready demo of the ChaosOracle prediction market settlement system on 
 ```
                                     Chainlink CRE DON
                                    ┌─────────────────────┐
-                                   │ Trigger 1: Cron 5m  │──→ createStudioForMarket()
+                                   │ Trigger 1: Cron 10m │──→ createStudioForMarket()
                                    │ Trigger 2: LogTrig  │──→ settleWithOutcome()
-                                   │ Trigger 3: Cron 3m  │──→ Gateway /close-epoch
+                                   │ Trigger 3: Cron 10m │──→ Gateway /close-epoch
                                    └─────────────────────┘
                                              │
 ┌────────────────┐     ┌─────────────────────┼───────────────────────┐
